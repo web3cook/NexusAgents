@@ -43,11 +43,22 @@ cd nexus
 python3.13 -m venv .venv          # or python3.11 / python3.12
 source .venv/bin/activate
 
-# Install dependencies
+# Install dependencies (also registers the `nexus` CLI command)
 pip install -e ".[dev]"
+
+# Verify the CLI is available
+nexus --help
 
 # Set your Anthropic API key
 export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+The `pip install -e .` step registers `nexus` as a shell command via the `[project.scripts]` entry point in `pyproject.toml`. After that, `nexus build` and `nexus eval-cmd` work from any directory as long as the venv is active.
+
+If you want only the runtime (no test/dev tools):
+
+```bash
+pip install -e .
 ```
 
 For real deployments you also need:
