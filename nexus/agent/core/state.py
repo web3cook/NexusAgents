@@ -1,7 +1,7 @@
 from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 import json
@@ -64,6 +64,7 @@ class DeploymentResult:
 
 @dataclass
 class TestReport:
+    __test__ = False  # prevent pytest from collecting this dataclass as a test suite
     integration_passed: int
     integration_failed: int
     e2e_passed: int
@@ -86,7 +87,7 @@ class BuildState:
     checkpointed_at: datetime | None = None
 
     def checkpoint(self, path: Path) -> None:
-        self.checkpointed_at = datetime.utcnow()
+        self.checkpointed_at = datetime.now(timezone.utc)
         data = asdict(self)
         data["current_phase"] = self.current_phase.value
         data["checkpointed_at"] = self.checkpointed_at.isoformat()

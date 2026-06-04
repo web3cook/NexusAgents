@@ -1,6 +1,4 @@
-import json
-from pathlib import Path
-from agent.core.state import BuildState, Phase, AppSpec, CostSummary, BackendManifest, FrontendManifest, DeploymentResult, TestReport
+from agent.core.state import BuildState, Phase, AppSpec, CostSummary
 
 def test_build_state_defaults():
     s = BuildState(session_id="abc", user_description="build me an app")
@@ -26,6 +24,6 @@ def test_build_state_checkpoint_roundtrip(tmp_path):
     assert loaded.app_spec.features == ["auth"]
     assert loaded.cost_summary.aws_monthly_usd == 47.20
 
-def test_phase_ordering():
+def test_phase_enum_completeness():
     phases = [Phase.PLANNING, Phase.BACKEND, Phase.FRONTEND, Phase.INFRA, Phase.TEST, Phase.MONITORING, Phase.COMPLETE]
     assert len(phases) == 7
