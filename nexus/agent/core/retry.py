@@ -4,19 +4,20 @@ import functools
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Type, TypeVar
+from typing import Callable, Type
 
 from agent.core.errors import NexusError, RateLimitError
 
-T = TypeVar("T")
-
 def retry(
     max_attempts: int = 4,
+    # max_attempts must be >= 1; 0 would silently return None on every call
     base_delay_seconds: float = 1.0,
     max_delay_seconds: float = 30.0,
     backoff_factor: float = 2.0,
     retryable_on: list[Type[Exception]] | None = None,
 ) -> Callable:
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
     _retryable = tuple(retryable_on or [NexusError])
 
     def decorator(fn: Callable) -> Callable:
@@ -93,5 +94,6 @@ _limiters: dict[str, TokenBucketRateLimiter] = {
 }
 
 def rate_limit(namespace: str) -> None:
-    if namespace in _limiters:
-        _limiters[namespace].acquire(namespace)
+    if namespace not in _limiters:
+        raise NexusError(f"Unknown rate-limit namespace: '{namespace}'")
+    _limiters[namespace].acquire(namespace)
