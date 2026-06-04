@@ -17,7 +17,7 @@ from agent.core.errors import NexusError
 @instrument(namespace="code", tool="read_file")
 def read_file(file_path: str) -> dict:
     rate_limit("code")
-    content = Path(file_path).read_text()
+    content = Path(file_path).read_text(encoding="utf-8")
     return {"file_path": file_path, "content": content, "lines": len(content.splitlines())}
 
 
@@ -35,8 +35,8 @@ def write_file(file_path: str, content: str) -> dict:
     rate_limit("code")
     p = Path(file_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    return {"file_path": file_path, "bytes_written": len(content)}
+    p.write_text(content, encoding="utf-8")
+    return {"file_path": file_path, "bytes_written": len(content.encode("utf-8"))}
 
 
 @registry.register(
@@ -46,10 +46,11 @@ def write_file(file_path: str, content: str) -> dict:
 )
 @instrument(namespace="code", tool="list_dir")
 def list_dir(directory: str) -> dict:
+    rate_limit("code")
     p = Path(directory)
     entries = [
         {"name": e.name, "type": "dir" if e.is_dir() else "file", "size": e.stat().st_size if e.is_file() else 0}
-        for e in sorted(p.iterdir())
+        for e in sorted(p.iterdir(), key=lambda e: e.name)
     ]
     return {"directory": directory, "entries": entries}
 
@@ -61,7 +62,11 @@ def list_dir(directory: str) -> dict:
 )
 @instrument(namespace="code", tool="delete_file")
 def delete_file(file_path: str) -> dict:
-    Path(file_path).unlink()
+    rate_limit("code")
+    p = Path(file_path)
+    if not p.exists():
+        raise NexusError(f"delete_file: file not found: {file_path}")
+    p.unlink()
     return {"deleted": file_path}
 
 
@@ -81,10 +86,10 @@ def search_code(pattern: str, directory: str) -> dict:
     for path in Path(directory).rglob("*"):
         if path.is_file():
             try:
-                for i, line in enumerate(path.read_text().splitlines(), 1):
+                for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                     if re.search(pattern, line):
                         matches.append({"file": str(path), "line": i, "text": line.strip()})
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, OSError):
                 pass
     return {"pattern": pattern, "matches": matches}
 
@@ -106,8 +111,8 @@ def search_code(pattern: str, directory: str) -> dict:
 def apply_patch(file_path: str, old_string: str, new_string: str) -> dict:
     rate_limit("code")
     p = Path(file_path)
-    content = p.read_text()
+    content = p.read_text(encoding="utf-8")
     if old_string not in content:
         raise NexusError(f"apply_patch: old_string not found in {file_path}")
-    p.write_text(content.replace(old_string, new_string, 1))
+    p.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
     return {"file_path": file_path, "patched": True}
