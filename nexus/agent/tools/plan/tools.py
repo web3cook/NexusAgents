@@ -107,7 +107,7 @@ def analyze_spec(user_description: str) -> dict:
 def estimate_steps(feature_count: int, model_count: int) -> dict:
     rate_limit("plan")
     base = len(STEP_SEQUENCE)
-    extra = (feature_count - 1) * 2 + (model_count - 1) * 2
+    extra = max(0, (feature_count - 1) * 2 + (model_count - 1) * 2)
     total = base + extra
     return {"steps": total, "breakdown": STEP_SEQUENCE}
 
@@ -121,7 +121,7 @@ def estimate_steps(feature_count: int, model_count: int) -> dict:
             "steps": {"type": "integer"},
             "avg_tokens_per_step": {"type": "integer"},
         },
-        "required": ["steps", "avg_tokens_per_step"],
+        "required": ["steps"],
     },
 )
 @instrument(namespace="plan", tool="estimate_tokens")
@@ -172,16 +172,21 @@ def estimate_aws_cost(region: str, include_rds: bool = True) -> dict:
 @instrument(namespace="plan", tool="render_summary")
 def render_summary(aws_monthly_usd: float, llm_cost_usd: float, steps_estimated: int, llm_tokens_estimated: int) -> dict:
     rate_limit("plan")
-    summary = (
-        f"╔══════════════════════════════════════╗\n"
-        f"║         NEXUS BUILD ESTIMATE         ║\n"
-        f"╠══════════════════════════════════════╣\n"
-        f"║  AWS cost:    ${aws_monthly_usd:.2f}/month          ║\n"
-        f"║  LLM cost:    ${llm_cost_usd:.4f} (this run)    ║\n"
-        f"║  Steps:       {steps_estimated}                       ║\n"
-        f"║  Tokens:      {llm_tokens_estimated:,}               ║\n"
-        f"╚══════════════════════════════════════╝"
-    )
+    W = 38  # inner content width between ║ borders
+    def row(label: str, value: str) -> str:
+        content = f"  {label}{value}"
+        return f"║{content:<{W}}║"
+
+    summary = "\n".join([
+        "╔══════════════════════════════════════╗",
+        f"║{'NEXUS BUILD ESTIMATE':^{W}}║",
+        "╠══════════════════════════════════════╣",
+        row("AWS cost:    $", f"{aws_monthly_usd:.2f}/month"),
+        row("LLM cost:    $", f"{llm_cost_usd:.4f} (this run)"),
+        row("Steps:        ", str(steps_estimated)),
+        row("Tokens:       ", f"{llm_tokens_estimated:,}"),
+        "╚══════════════════════════════════════╝",
+    ])
     return {"summary": summary}
 
 
