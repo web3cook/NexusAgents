@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Literal
+from typing import Any, Literal
 
 class NexusError(Exception):
     def __init__(self, message: str, retryable: bool = False):
@@ -23,7 +23,9 @@ class DeploymentError(NexusError):
         self.cluster_name = cluster_name
 
 class TestFailure(NexusError):
-    def __init__(self, message: str, report: dict):
+    __test__ = False  # prevent pytest from collecting this as a test class
+
+    def __init__(self, message: str, report: dict[str, Any]):
         super().__init__(message, retryable=False)
         self.report = report
 

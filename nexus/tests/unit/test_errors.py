@@ -7,6 +7,10 @@ def test_retryable_flag():
     assert RateLimitError("aws").retryable is True
     assert TransientAwsError("timeout").retryable is True
     assert NetworkError("conn refused").retryable is True
+    assert AlertingError("bot down").retryable is True
+
+def test_non_retryable_planning():
+    assert PlanningError("bad spec").retryable is False
 
 def test_non_retryable():
     tf = TestFailure("tests failed", report={"passed": 0, "failed": 3})
