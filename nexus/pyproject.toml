@@ -5,6 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nexus"
 version = "0.1.0"
+description = "Autonomous full-stack app builder: natural language → deployed React + FastAPI + PostgreSQL on AWS EKS"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
@@ -44,7 +45,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent", "eval", "templates"]
+packages = ["agent", "eval"]
+include = ["cli.py"]
 
 [tool.ruff]
 line-length = 100
