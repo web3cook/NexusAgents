@@ -8,5 +8,6 @@ build/
 .env
 *.log
 .mypy_cache/
+.ruff_cache/
 node_modules/
 generated/
