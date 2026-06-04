@@ -1,4 +1,4 @@
-from agent.tools.registry import ToolRegistry, ToolDefinition
+from agent.tools.registry import ToolRegistry
 import pytest
 
 def test_register_and_call():
@@ -43,3 +43,28 @@ def test_call_unknown_tool_raises():
     reg = ToolRegistry()
     with pytest.raises(ValueError, match="Unknown tool"):
         reg.call("nonexistent.tool")
+
+def test_register_without_namespace_raises():
+    reg = ToolRegistry()
+    with pytest.raises(ValueError, match="namespace.toolname"):
+        reg.register(name="notool", description="x", input_schema={})
+
+def test_get_namespaces_sorted():
+    reg = ToolRegistry()
+
+    @reg.register(name="z.one", description="z", input_schema={"type": "object", "properties": {}})
+    def one(): pass
+
+    @reg.register(name="a.two", description="a", input_schema={"type": "object", "properties": {}})
+    def two(): pass
+
+    assert reg.get_namespaces() == ["a", "z"]
+
+def test_len():
+    reg = ToolRegistry()
+    assert len(reg) == 0
+
+    @reg.register(name="ns.t", description="t", input_schema={"type": "object", "properties": {}})
+    def t(): pass
+
+    assert len(reg) == 1

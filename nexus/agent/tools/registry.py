@@ -8,7 +8,7 @@ class ToolDefinition:
     name: str
     description: str
     input_schema: dict
-    fn: Callable
+    fn: Callable[..., Any]
 
 
 class ToolRegistry:
@@ -16,6 +16,8 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
 
     def register(self, name: str, description: str, input_schema: dict) -> Callable:
+        if "." not in name:
+            raise ValueError(f"Tool name must be 'namespace.toolname', got: '{name}'")
         def decorator(fn: Callable) -> Callable:
             self._tools[name] = ToolDefinition(
                 name=name,
@@ -44,7 +46,7 @@ class ToolRegistry:
         return result
 
     def get_namespaces(self) -> list[str]:
-        return list({name.split(".")[0] for name in self._tools})
+        return sorted({name.split(".")[0] for name in self._tools})
 
     def __len__(self) -> int:
         return len(self._tools)
