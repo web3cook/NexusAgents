@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ name }}
+  namespace: {{ namespace }}
+spec:
+  replicas: {{ replicas | default(2) }}
+  selector:
+    matchLabels:
+      app: {{ name }}
+  template:
+    metadata:
+      labels:
+        app: {{ name }}
+    spec:
+      containers:
+        - name: {{ name }}
+          image: {{ image }}
+          ports:
+            - containerPort: {{ port }}
+          env:
+            {% for env_var in env_vars %}- name: {{ env_var.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ namespace }}-secrets
+                  key: {{ env_var.key }}
+            {% endfor %}
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: {{ health_path | default('/health') }}
+              port: {{ port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: {{ health_path | default('/health') }}
+              port: {{ port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5

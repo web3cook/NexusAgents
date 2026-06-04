@@ -1,0 +1,19 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.database import engine, Base
+{% for model in db_models %}from app.models.{{ model | lower }} import {{ model }}
+{% endfor %}
+{% for route in api_routes %}from app.routes.{{ route.lstrip('/').split('/')[0] }} import router as {{ route.lstrip('/').split('/')[0] }}_router
+{% endfor %}
+from app.routes.admin import router as admin_router
+
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="{{ app_name }}", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "app": "{{ app_name }}"}
+
+{% for route in api_routes %}app.include_router({{ route.lstrip('/').split('/')[0] }}_router, prefix="{{ '/' + route.lstrip('/').split('/')[0] }}", tags=["{{ route.lstrip('/').split('/')[0] }}"])
+{% endfor %}app.include_router(admin_router, prefix="/admin", tags=["admin"])
