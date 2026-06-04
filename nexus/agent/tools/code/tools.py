@@ -2,6 +2,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from jinja2 import Environment, FileSystemLoader
 from agent.tools.registry import registry
 from agent.core.observability import instrument
 from agent.core.retry import rate_limit
@@ -121,17 +122,14 @@ def apply_patch(file_path: str, old_string: str, new_string: str) -> dict:
 
 # ── Scaffold Tools ────────────────────────────────────────────────────────────
 
-from jinja2 import Environment, FileSystemLoader
-from pathlib import Path as _Path
-
-_TEMPLATES_DIR = _Path(__file__).parent.parent.parent.parent / "templates"
+_TEMPLATES_DIR = Path(__file__).parent.parent.parent.parent / "templates"
 _jinja = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)), trim_blocks=True, lstrip_blocks=True)
 
 def _render(template_path: str, **ctx) -> str:
     return _jinja.get_template(template_path).render(**ctx)
 
 def _write(workspace: str, rel_path: str, content: str) -> str:
-    full = _Path(workspace) / rel_path
+    full = Path(workspace) / rel_path
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text(content, encoding="utf-8")
     return str(full)
