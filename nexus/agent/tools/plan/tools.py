@@ -3,9 +3,10 @@ from agent.tools.registry import registry
 from agent.core.observability import instrument
 from agent.core.retry import rate_limit
 
-TOKENS_PER_DOLLAR = {
-    "claude-opus-4-8":    {"input": 1_000_000 / 15, "output": 1_000_000 / 75},
-    "claude-sonnet-4-6":  {"input": 1_000_000 / 3,  "output": 1_000_000 / 15},
+# USD per token (not per million)
+_PRICING = {
+    "claude-opus-4-8":   {"input": 15 / 1_000_000,  "output": 75 / 1_000_000},
+    "claude-sonnet-4-6": {"input": 3  / 1_000_000,  "output": 15 / 1_000_000},
 }
 
 AWS_BASE_COSTS = {
@@ -127,10 +128,37 @@ def estimate_steps(feature_count: int, model_count: int) -> dict:
 @instrument(namespace="plan", tool="estimate_tokens")
 def estimate_tokens(steps: int, avg_tokens_per_step: int = 6000) -> dict:
     rate_limit("plan")
-    total = steps * avg_tokens_per_step
-    rate = TOKENS_PER_DOLLAR["claude-sonnet-4-6"]["input"]
-    cost = total / rate
-    return {"total_tokens": total, "cost_usd": round(cost, 4)}
+    # --- Orchestrator (claude-opus-4-8) ---
+    # ~12 turns; each turn carries system prompt + 69 tools + history ≈ 40K input, 3K output
+    orch_turns = max(12, steps // 3)
+    orch_in  = orch_turns * 40_000
+    orch_out = orch_turns * 3_000
+    opus = _PRICING["claude-opus-4-8"]
+    orch_cost = orch_in * opus["input"] + orch_out * opus["output"]
+
+    # --- Subagents (claude-sonnet-4-6) ---
+    # 5 subagents; builder agents run ~45 iterations each with ~20K input + 4K output
+    subagent_iterations = 5 * 45
+    sub_in  = subagent_iterations * 20_000
+    sub_out = subagent_iterations * 4_000
+    sonnet = _PRICING["claude-sonnet-4-6"]
+    sub_cost = sub_in * sonnet["input"] + sub_out * sonnet["output"]
+
+    # Prompt caching reduces repeated token costs by ~60%; 1.5x safety multiplier
+    cache_factor   = 0.40   # 60% savings
+    safety_factor  = 1.5
+    total_cost = (orch_cost + sub_cost) * cache_factor * safety_factor
+    total_tokens = orch_in + orch_out + sub_in + sub_out
+
+    return {
+        "total_tokens": total_tokens,
+        "cost_usd": round(total_cost, 2),
+        "breakdown": {
+            "orchestrator_usd": round(orch_cost * cache_factor * safety_factor, 2),
+            "subagents_usd":    round(sub_cost  * cache_factor * safety_factor, 2),
+            "note": "estimate assumes 60% cache hit rate; actual cost varies",
+        },
+    }
 
 
 @registry.register(
@@ -182,7 +210,7 @@ def render_summary(aws_monthly_usd: float, llm_cost_usd: float, steps_estimated:
         f"║{'NEXUS BUILD ESTIMATE':^{W}}║",
         "╠══════════════════════════════════════╣",
         row("AWS cost:    $", f"{aws_monthly_usd:.2f}/month"),
-        row("LLM cost:    $", f"{llm_cost_usd:.4f} (this run)"),
+        row("LLM cost:    ~$", f"{llm_cost_usd:.2f} (estimate)"),
         row("Steps:        ", str(steps_estimated)),
         row("Tokens:       ", f"{llm_tokens_estimated:,}"),
         "╚══════════════════════════════════════╝",

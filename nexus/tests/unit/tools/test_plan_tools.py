@@ -13,9 +13,12 @@ def test_estimate_steps_returns_int():
     assert result["steps"] >= 20
 
 def test_estimate_tokens_returns_cost():
-    result = estimate_tokens(steps=28, avg_tokens_per_step=6000)
-    assert result["total_tokens"] == 28 * 6000
-    assert result["cost_usd"] > 0
+    result = estimate_tokens(steps=28)
+    assert result["total_tokens"] > 1_000_000   # realistic multi-model context
+    assert result["cost_usd"] > 1.0             # at least $1 for any real build
+    assert "breakdown" in result
+    assert result["breakdown"]["orchestrator_usd"] > 0
+    assert result["breakdown"]["subagents_usd"] > 0
 
 def test_estimate_aws_cost_returns_breakdown():
     result = estimate_aws_cost(region="us-east-1", include_rds=True)
