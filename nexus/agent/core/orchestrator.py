@@ -85,6 +85,8 @@ def run(
     ]
 
     current_phase_logged: Phase | None = None
+    phase_error_counts: dict[Phase, int] = {}
+    MAX_PHASE_ERRORS = 3  # bail out if the same phase keeps returning subagent errors
 
     while state.current_phase != Phase.COMPLETE:
         if state.current_phase != current_phase_logged:
@@ -128,6 +130,22 @@ def run(
                     status_str = _result_summary(result)
                     logger.info("       [green]ok[/green] %s  [dim]%dms[/dim]", status_str, elapsed_ms)
                     logger.debug("       full result: %s", result)
+                    if isinstance(result, dict) and "error" in result:
+                        count = phase_error_counts.get(state.current_phase, 0) + 1
+                        phase_error_counts[state.current_phase] = count
+                        logger.warning(
+                            "  subagent returned error in phase %s (%d/%d): %s",
+                            state.current_phase.name, count, MAX_PHASE_ERRORS, result["error"],
+                        )
+                        if count >= MAX_PHASE_ERRORS:
+                            logger.error(
+                                "[red]Phase %s failed %d times — aborting build.[/red] "
+                                "Re-run with --resume after fixing the issue.",
+                                state.current_phase.name, count,
+                            )
+                            state.current_phase = Phase.COMPLETE
+                    else:
+                        phase_error_counts.pop(state.current_phase, None)
                 except Exception as exc:
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     logger.warning("       [red]err[/red] %s  [dim]%dms[/dim]", exc, elapsed_ms)

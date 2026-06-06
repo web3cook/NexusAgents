@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
+import logging
 import re
+import time
 import anthropic
 from agent.tools.registry import registry
 
@@ -28,14 +30,26 @@ class BaseSubagent:
         self.allowed_namespaces = allowed_namespaces
         self.model = model
         self.max_iterations = max_iterations
+        self._logger = logging.getLogger(f"nexus.subagent.{name}")
 
     def get_tools(self) -> list[dict]:
-        return registry.get_anthropic_tools(namespaces=self.allowed_namespaces)
+        tools = registry.get_anthropic_tools(namespaces=self.allowed_namespaces)
+        if tools:
+            tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+        return tools
 
     def run(self, input_data: dict) -> dict:
+        self._logger.info(
+            "[bold cyan]%s[/bold cyan] starting  [dim]namespaces=%s[/dim]",
+            self.name, self.allowed_namespaces,
+        )
+        self._logger.debug("  input: %s", {k: str(v)[:80] for k, v in input_data.items()})
+
         messages = [{"role": "user", "content": str(input_data)}]
         tools = self.get_tools()
         iterations = 0
+        tool_call_count = 0
+        start = time.monotonic()
 
         while iterations < self.max_iterations:
             iterations += 1
@@ -51,9 +65,25 @@ class BaseSubagent:
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
+                    tool_call_count += 1
+                    display_name = registry._registry_name(block.name) if "__" in block.name else block.name
+                    self._logger.info(
+                        "  [dim][%s #%d][/dim] → %s",
+                        self.name, tool_call_count, display_name,
+                    )
+                    self._logger.debug("    input: %s", block.input)
+                    t0 = time.monotonic()
                     try:
                         result = registry.call(block.name, **block.input)
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        self._logger.info(
+                            "    [green]ok[/green]  [dim]%dms[/dim]", elapsed_ms,
+                        )
                     except Exception as exc:
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        self._logger.warning(
+                            "    [red]err[/red] %s  [dim]%dms[/dim]", exc, elapsed_ms,
+                        )
                         result = {"error": str(exc)}
                     tool_results.append({
                         "type": "tool_result",
@@ -70,10 +100,21 @@ class BaseSubagent:
                     if hasattr(block, "text") and "<result>" in block.text:
                         match = re.search(r"<result>(.*?)</result>", block.text, re.DOTALL)
                         if match:
+                            elapsed = time.monotonic() - start
+                            self._logger.info(
+                                "[green]✓[/green] [bold cyan]%s[/bold cyan] complete"
+                                "  [dim]%d tool calls, %.1fs[/dim]",
+                                self.name, tool_call_count, elapsed,
+                            )
                             try:
                                 return json.loads(match.group(1).strip())
                             except json.JSONDecodeError:
                                 return {"raw": match.group(1).strip()}
                 break
 
+        self._logger.warning(
+            "[yellow]%s hit max_iterations (%d) without returning <result>[/yellow]"
+            "  [dim]%d tool calls[/dim]",
+            self.name, self.max_iterations, tool_call_count,
+        )
         return {"error": "max_iterations reached", "iterations": iterations}
