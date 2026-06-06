@@ -69,7 +69,7 @@ def build(
 
     from agent.core.orchestrator import run
     try:
-        state = run(user_description=description, workspace=workspace)
+        state = run(user_description=description, workspace=workspace, resume=resume)
         if state.deployment_result:
             console.print("\n[bold green]✓ Build complete![/bold green]")
             console.print(f"Frontend: [link]{state.deployment_result.frontend_url}[/link]")

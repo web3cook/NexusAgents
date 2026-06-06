@@ -40,26 +40,44 @@ PHASE_TOOLS = {
 }
 
 
-def run(user_description: str, workspace: str, checkpoint_dir: Path | None = None) -> BuildState:
-    session_id = str(uuid.uuid4())[:8]
-    set_session_id(session_id)
+def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Return the most recently written checkpoint file, or None."""
+    files = sorted(checkpoint_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
+def run(
+    user_description: str,
+    workspace: str,
+    checkpoint_dir: Path | None = None,
+    resume: bool = False,
+) -> BuildState:
     checkpoint_dir = checkpoint_dir or Path("/tmp/nexus-checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    state = BuildState(session_id=session_id, user_description=user_description)
-    checkpoint_path = checkpoint_dir / f"{session_id}.json"
+    resumed = False
+    if resume:
+        latest = _latest_checkpoint(checkpoint_dir)
+        if latest:
+            state = BuildState.from_checkpoint(latest)
+            set_session_id(state.session_id)
+            checkpoint_path = latest
+            resumed = True
+            logger.info(
+                "[yellow]Resuming session %s from phase %s[/yellow]  [dim](%s)[/dim]",
+                state.session_id, state.current_phase.name, latest.name,
+            )
+        else:
+            logger.warning("--resume requested but no checkpoint found in %s — starting fresh", checkpoint_dir)
 
-    resumed = checkpoint_path.exists()
-    if resumed:
-        state = BuildState.from_checkpoint(checkpoint_path)
+    if not resumed:
+        session_id = str(uuid.uuid4())[:8]
+        set_session_id(session_id)
+        state = BuildState(session_id=session_id, user_description=user_description)
+        checkpoint_path = checkpoint_dir / f"{session_id}.json"
 
     build_start = time.monotonic()
-    logger.info(
-        "[bold]session %s[/bold] — %s%s",
-        session_id,
-        user_description[:100],
-        "  [yellow](resuming)[/yellow]" if resumed else "",
-    )
+    logger.info("[bold]session %s[/bold] — %s", state.session_id, user_description[:100])
     logger.info("workspace: %s", workspace)
 
     messages: list[dict] = [
