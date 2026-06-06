@@ -3,6 +3,7 @@ import json
 import subprocess
 from datetime import date, datetime, timedelta
 import boto3
+from botocore.exceptions import ClientError
 from agent.tools.registry import registry
 from agent.core.observability import instrument
 from agent.core.retry import retry, rate_limit
@@ -32,6 +33,8 @@ def create_ecr_repo(repo_name: str, region: str) -> dict:
     except ecr.exceptions.RepositoryAlreadyExistsException:
         resp = ecr.describe_repositories(repositoryNames=[repo_name])
         return {"repository_uri": resp["repositories"][0]["repositoryUri"], "created": False}
+    except ClientError as e:
+        raise TransientAwsError(f"create_ecr_repo failed: {e}") from e
     return {"repository_uri": resp["repository"]["repositoryUri"], "created": True}
 
 
@@ -50,10 +53,9 @@ def create_ecr_repo(repo_name: str, region: str) -> dict:
     },
 )
 @instrument(namespace="aws", tool="create_eks_cluster")
-@retry(max_attempts=2, base_delay_seconds=10.0, retryable_on=[TransientAwsError, NetworkError])
+@retry(max_attempts=3, base_delay_seconds=10.0, retryable_on=[TransientAwsError, NetworkError])
 def create_eks_cluster(cluster_name: str, region: str, node_type: str = "t3.medium", node_count: int = 2) -> dict:
     rate_limit("aws")
-    # Check if the cluster already exists and is active — skip creation if so
     eks = _client("eks", region)
     try:
         resp = eks.describe_cluster(name=cluster_name)
@@ -61,26 +63,29 @@ def create_eks_cluster(cluster_name: str, region: str, node_type: str = "t3.medi
         if status == "ACTIVE":
             return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False}
         if status in ("CREATING", "UPDATING"):
-            # Wait for it to become active using the boto3 waiter (polls every 30s, up to 40 attempts)
+            # polls every 30s, up to 40 attempts (20 minutes)
             waiter = eks.get_waiter("cluster_active")
             waiter.wait(name=cluster_name, WaiterConfig={"Delay": 30, "MaxAttempts": 40})
             return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False}
     except eks.exceptions.ResourceNotFoundException:
-        pass  # cluster doesn't exist yet — create it
+        pass  # cluster doesn't exist — create it
 
-    result = subprocess.run(
-        [
-            "eksctl", "create", "cluster",
-            "--name", cluster_name,
-            "--region", region,
-            "--node-type", node_type,
-            "--nodes", str(node_count),
-            "--managed",
-        ],
-        capture_output=True, text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=1500,  # eksctl blocks until ACTIVE — allow up to 25 minutes
-    )
+    try:
+        result = subprocess.run(
+            [
+                "eksctl", "create", "cluster",
+                "--name", cluster_name,
+                "--region", region,
+                "--node-type", node_type,
+                "--nodes", str(node_count),
+                "--managed",
+            ],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=1500,  # eksctl blocks until ACTIVE — allow up to 25 minutes
+        )
+    except subprocess.TimeoutExpired:
+        raise TransientAwsError("eksctl timed out after 1500s")
     if result.returncode != 0:
         raise TransientAwsError(f"eksctl failed: {result.stderr[:400]}")
     return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": True}
@@ -96,13 +101,17 @@ def create_eks_cluster(cluster_name: str, region: str, node_type: str = "t3.medi
     },
 )
 @instrument(namespace="aws", tool="get_eks_kubeconfig")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[TransientAwsError])
 def get_eks_kubeconfig(cluster_name: str, region: str) -> dict:
     rate_limit("aws")
-    result = subprocess.run(
-        ["aws", "eks", "update-kubeconfig", "--name", cluster_name, "--region", region],
-        capture_output=True, text=True,
-        stdin=subprocess.DEVNULL, timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            ["aws", "eks", "update-kubeconfig", "--name", cluster_name, "--region", region],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise TransientAwsError("update-kubeconfig timed out after 60s")
     if result.returncode != 0:
         raise TransientAwsError(f"update-kubeconfig failed: {result.stderr[:300]}")
     return {"cluster_name": cluster_name, "kubeconfig_updated": True}
@@ -124,21 +133,27 @@ def get_eks_kubeconfig(cluster_name: str, region: str) -> dict:
     },
 )
 @instrument(namespace="aws", tool="create_rds_instance")
-@retry(max_attempts=2, base_delay_seconds=5.0, retryable_on=[TransientAwsError])
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[TransientAwsError])
 def create_rds_instance(db_identifier: str, region: str, db_name: str, master_username: str, master_password: str) -> dict:
     rate_limit("aws")
     rds = _client("rds", region)
-    resp = rds.create_db_instance(
-        DBInstanceIdentifier=db_identifier,
-        DBInstanceClass="db.t3.micro",
-        Engine="postgres",
-        MasterUsername=master_username,
-        MasterUserPassword=master_password,
-        DBName=db_name,
-        AllocatedStorage=20,
-        PubliclyAccessible=False,
-    )
-    return {"db_identifier": db_identifier, "status": resp["DBInstance"]["DBInstanceStatus"]}
+    try:
+        resp = rds.create_db_instance(
+            DBInstanceIdentifier=db_identifier,
+            DBInstanceClass="db.t3.micro",
+            Engine="postgres",
+            MasterUsername=master_username,
+            MasterUserPassword=master_password,
+            DBName=db_name,
+            AllocatedStorage=20,
+            PubliclyAccessible=False,
+        )
+        return {"db_identifier": db_identifier, "status": resp["DBInstance"]["DBInstanceStatus"], "created": True}
+    except rds.exceptions.DBInstanceAlreadyExistsFault:
+        resp = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
+        return {"db_identifier": db_identifier, "status": resp["DBInstances"][0]["DBInstanceStatus"], "created": False}
+    except ClientError as e:
+        raise TransientAwsError(f"create_rds_instance failed: {e}") from e
 
 
 @registry.register(
@@ -151,11 +166,14 @@ def create_rds_instance(db_identifier: str, region: str, db_name: str, master_us
     },
 )
 @instrument(namespace="aws", tool="get_rds_endpoint")
-@retry(max_attempts=10, base_delay_seconds=30.0, retryable_on=[TransientAwsError])
+@retry(max_attempts=20, base_delay_seconds=30.0, retryable_on=[TransientAwsError])
 def get_rds_endpoint(db_identifier: str, region: str) -> dict:
     rate_limit("aws")
     rds = _client("rds", region)
-    resp = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
+    try:
+        resp = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
+    except ClientError as e:
+        raise TransientAwsError(f"get_rds_endpoint failed: {e}") from e
     instance = resp["DBInstances"][0]
     if instance["DBInstanceStatus"] != "available":
         raise TransientAwsError(f"RDS not ready: {instance['DBInstanceStatus']}")
@@ -174,14 +192,21 @@ def get_rds_endpoint(db_identifier: str, region: str) -> dict:
     },
 )
 @instrument(namespace="aws", tool="create_s3_bucket")
+@retry(max_attempts=3, base_delay_seconds=2.0, retryable_on=[TransientAwsError])
 def create_s3_bucket(bucket_name: str, region: str) -> dict:
     rate_limit("aws")
     s3 = _client("s3", region)
     kwargs: dict = {"Bucket": bucket_name}
     if region != "us-east-1":
         kwargs["CreateBucketConfiguration"] = {"LocationConstraint": region}
-    s3.create_bucket(**kwargs)
-    return {"bucket_name": bucket_name, "region": region, "created": True}
+    try:
+        s3.create_bucket(**kwargs)
+        return {"bucket_name": bucket_name, "region": region, "created": True}
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
+            return {"bucket_name": bucket_name, "region": region, "created": False}
+        raise TransientAwsError(f"create_s3_bucket failed: {e}") from e
 
 
 @registry.register(
@@ -194,17 +219,30 @@ def create_s3_bucket(bucket_name: str, region: str) -> dict:
     },
 )
 @instrument(namespace="aws", tool="create_cloudfront_dist")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[TransientAwsError])
 def create_cloudfront_dist(bucket_name: str, region: str) -> dict:
     rate_limit("aws")
-    cf = _client("cloudfront", region)
-    resp = cf.create_distribution(DistributionConfig={
-        "CallerReference": bucket_name,
-        "Origins": {"Quantity": 1, "Items": [{"Id": bucket_name, "DomainName": f"{bucket_name}.s3.amazonaws.com", "S3OriginConfig": {"OriginAccessIdentity": ""}}]},
-        "DefaultCacheBehavior": {"TargetOriginId": bucket_name, "ViewerProtocolPolicy": "redirect-to-https", "ForwardedValues": {"QueryString": False, "Cookies": {"Forward": "none"}}, "MinTTL": 0},
-        "Comment": f"Nexus CDN for {bucket_name}",
-        "Enabled": True,
-    })
-    return {"distribution_id": resp["Distribution"]["Id"], "domain_name": resp["Distribution"]["DomainName"]}
+    cf = _client("cloudfront", "us-east-1")  # CloudFront is always us-east-1
+    try:
+        resp = cf.create_distribution(DistributionConfig={
+            "CallerReference": bucket_name,  # idempotency key — same bucket = same dist
+            "Origins": {"Quantity": 1, "Items": [{"Id": bucket_name, "DomainName": f"{bucket_name}.s3.amazonaws.com", "S3OriginConfig": {"OriginAccessIdentity": ""}}]},
+            "DefaultCacheBehavior": {"TargetOriginId": bucket_name, "ViewerProtocolPolicy": "redirect-to-https", "ForwardedValues": {"QueryString": False, "Cookies": {"Forward": "none"}}, "MinTTL": 0},
+            "Comment": f"Nexus CDN for {bucket_name}",
+            "Enabled": True,
+        })
+        return {"distribution_id": resp["Distribution"]["Id"], "domain_name": resp["Distribution"]["DomainName"], "created": True}
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code == "DistributionAlreadyExists":
+            # CallerReference collision means the same dist was already created — list to find it
+            dists = cf.list_distributions()
+            items = dists.get("DistributionList", {}).get("Items", [])
+            for d in items:
+                for origin in d.get("Origins", {}).get("Items", []):
+                    if origin["Id"] == bucket_name:
+                        return {"distribution_id": d["Id"], "domain_name": d["DomainName"], "created": False}
+        raise TransientAwsError(f"create_cloudfront_dist failed: {e}") from e
 
 
 @registry.register(
@@ -244,17 +282,21 @@ def get_cost_estimate(region: str) -> dict:
     },
 )
 @instrument(namespace="aws", tool="get_cloudwatch_metrics")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[TransientAwsError])
 def get_cloudwatch_metrics(cluster_name: str, service_name: str, region: str) -> dict:
     rate_limit("aws")
     cw = _client("cloudwatch", region)
     end = datetime.utcnow()
     start = end - timedelta(hours=1)
-    resp = cw.get_metric_statistics(
-        Namespace="ContainerInsights",
-        MetricName="pod_cpu_utilization",
-        Dimensions=[{"Name": "ClusterName", "Value": cluster_name}, {"Name": "ServiceName", "Value": service_name}],
-        StartTime=start, EndTime=end, Period=300, Statistics=["Average"],
-    )
+    try:
+        resp = cw.get_metric_statistics(
+            Namespace="ContainerInsights",
+            MetricName="pod_cpu_utilization",
+            Dimensions=[{"Name": "ClusterName", "Value": cluster_name}, {"Name": "ServiceName", "Value": service_name}],
+            StartTime=start, EndTime=end, Period=300, Statistics=["Average"],
+        )
+    except ClientError as e:
+        raise TransientAwsError(f"get_cloudwatch_metrics failed: {e}") from e
     datapoints = [{"timestamp": dp["Timestamp"].isoformat(), "cpu_percent": round(dp["Average"], 2)} for dp in resp.get("Datapoints", [])]
     return {"cluster_name": cluster_name, "service_name": service_name, "datapoints": datapoints}
 
@@ -269,9 +311,16 @@ def get_cloudwatch_metrics(cluster_name: str, service_name: str, region: str) ->
     },
 )
 @instrument(namespace="aws", tool="create_iam_role")
+@retry(max_attempts=3, base_delay_seconds=3.0, retryable_on=[TransientAwsError])
 def create_iam_role(role_name: str, region: str) -> dict:
     rate_limit("aws")
     iam = _client("iam", region)
     trust = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "eks.amazonaws.com"}, "Action": "sts:AssumeRole"}]})
-    resp = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=trust)
-    return {"role_arn": resp["Role"]["Arn"], "role_name": role_name}
+    try:
+        resp = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=trust)
+        return {"role_arn": resp["Role"]["Arn"], "role_name": role_name, "created": True}
+    except iam.exceptions.EntityAlreadyExistsException:
+        resp = iam.get_role(RoleName=role_name)
+        return {"role_arn": resp["Role"]["Arn"], "role_name": role_name, "created": False}
+    except ClientError as e:
+        raise TransientAwsError(f"create_iam_role failed: {e}") from e

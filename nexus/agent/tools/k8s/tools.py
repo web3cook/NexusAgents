@@ -40,13 +40,13 @@ def _kube(*args: str, timeout: int = 60, stdin_text: str | None = None) -> subpr
     },
 )
 @instrument(namespace="k8s", tool="apply_manifest")
-@retry(max_attempts=3, base_delay_seconds=3.0, retryable_on=[NetworkError, NexusError])
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NetworkError, NexusError])
 def apply_manifest(manifest_path: str, kubeconfig: str | None = None) -> dict:
     rate_limit("k8s")
     args = ["apply", "-f", manifest_path]
     if kubeconfig:
         args += ["--kubeconfig", kubeconfig]
-    result = _kube(*args, timeout=60)
+    result = _kube(*args, timeout=120)
     if result.returncode != 0:
         raise NexusError(f"kubectl apply failed: {result.stderr[:300]}", retryable=True)
     return {"manifest_path": manifest_path, "applied": True, "stdout": result.stdout}
@@ -62,10 +62,13 @@ def apply_manifest(manifest_path: str, kubeconfig: str | None = None) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="delete_manifest")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NexusError])
 def delete_manifest(manifest_path: str) -> dict:
     rate_limit("k8s")
     result = _kube("delete", "-f", manifest_path, "--ignore-not-found=true", timeout=60)
-    return {"manifest_path": manifest_path, "deleted": result.returncode == 0}
+    if result.returncode != 0:
+        raise NexusError(f"kubectl delete failed: {result.stderr[:200]}", retryable=True)
+    return {"manifest_path": manifest_path, "deleted": True}
 
 
 @registry.register(
@@ -78,12 +81,13 @@ def delete_manifest(manifest_path: str) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="create_namespace")
+@retry(max_attempts=3, base_delay_seconds=3.0, retryable_on=[NexusError])
 def create_namespace(name: str) -> dict:
     rate_limit("k8s")
     manifest = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {name}\n"
     result = _kube("apply", "-f", "-", stdin_text=manifest, timeout=30)
     if result.returncode != 0:
-        return {"namespace": name, "created": False, "error": result.stderr[:200]}
+        raise NexusError(f"create_namespace failed: {result.stderr[:200]}", retryable=True)
     return {"namespace": name, "created": True}
 
 
@@ -101,6 +105,7 @@ def create_namespace(name: str) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="create_secret")
+@retry(max_attempts=3, base_delay_seconds=3.0, retryable_on=[NexusError])
 def create_secret(name: str, namespace: str, data: dict) -> dict:
     rate_limit("k8s")
     literals = [f"--from-literal={k}={v}" for k, v in data.items()]
@@ -110,10 +115,11 @@ def create_secret(name: str, namespace: str, data: dict) -> dict:
         *literals, timeout=30,
     )
     if dry.returncode != 0:
-        return {"name": name, "namespace": namespace, "created": False, "error": dry.stderr[:200]}
+        raise NexusError(f"secret dry-run failed: {dry.stderr[:200]}", retryable=True)
     apply = _kube("apply", "-f", "-", stdin_text=dry.stdout, timeout=30)
-    return {"name": name, "namespace": namespace, "created": apply.returncode == 0,
-            **({"error": apply.stderr[:200]} if apply.returncode != 0 else {})}
+    if apply.returncode != 0:
+        raise NexusError(f"secret apply failed: {apply.stderr[:200]}", retryable=True)
+    return {"name": name, "namespace": namespace, "created": True}
 
 
 @registry.register(
@@ -130,6 +136,7 @@ def create_secret(name: str, namespace: str, data: dict) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="create_configmap")
+@retry(max_attempts=3, base_delay_seconds=3.0, retryable_on=[NexusError])
 def create_configmap(name: str, namespace: str, data: dict) -> dict:
     rate_limit("k8s")
     literals = [f"--from-literal={k}={v}" for k, v in data.items()]
@@ -139,10 +146,11 @@ def create_configmap(name: str, namespace: str, data: dict) -> dict:
         *literals, timeout=30,
     )
     if dry.returncode != 0:
-        return {"name": name, "namespace": namespace, "created": False, "error": dry.stderr[:200]}
+        raise NexusError(f"configmap dry-run failed: {dry.stderr[:200]}", retryable=True)
     apply = _kube("apply", "-f", "-", stdin_text=dry.stdout, timeout=30)
-    return {"name": name, "namespace": namespace, "created": apply.returncode == 0,
-            **({"error": apply.stderr[:200]} if apply.returncode != 0 else {})}
+    if apply.returncode != 0:
+        raise NexusError(f"configmap apply failed: {apply.stderr[:200]}", retryable=True)
+    return {"name": name, "namespace": namespace, "created": True}
 
 
 @registry.register(
@@ -160,7 +168,7 @@ def create_configmap(name: str, namespace: str, data: dict) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="deploy_helm_chart")
-@retry(max_attempts=2, base_delay_seconds=5.0, retryable_on=[NexusError])
+@retry(max_attempts=3, base_delay_seconds=10.0, retryable_on=[NexusError])
 def deploy_helm_chart(release_name: str, chart_path: str, namespace: str, values: dict | None = None) -> dict:
     rate_limit("k8s")
     cmd = ["helm", "upgrade", "--install", release_name, chart_path,
@@ -169,12 +177,11 @@ def deploy_helm_chart(release_name: str, chart_path: str, namespace: str, values
         for k, v in values.items():
             cmd += ["--set", f"{k}={v}"]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=300,
-        )
+        # 600s: complex charts with CRDs, webhooks, and many resources can take time
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL, timeout=600)
     except subprocess.TimeoutExpired:
-        raise NexusError("helm upgrade timed out after 300s", retryable=True)
+        raise NexusError("helm upgrade timed out after 600s", retryable=True)
     if result.returncode != 0:
         raise NexusError(f"helm upgrade failed: {result.stderr[:300]}", retryable=True)
     return {"release_name": release_name, "deployed": True}
@@ -190,6 +197,7 @@ def deploy_helm_chart(release_name: str, chart_path: str, namespace: str, values
     },
 )
 @instrument(namespace="k8s", tool="get_pod_status")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NexusError])
 def get_pod_status(namespace: str, deployment: str | None = None) -> dict:
     rate_limit("k8s")
     result = _kube(
@@ -197,12 +205,14 @@ def get_pod_status(namespace: str, deployment: str | None = None) -> dict:
         r"jsonpath={range .items[*]}{.metadata.name},{.status.phase},{.status.containerStatuses[0].ready}\n{end}",
         timeout=30,
     )
+    if result.returncode != 0:
+        raise NexusError(f"get_pod_status failed: {result.stderr[:200]}", retryable=True)
     pods = []
     for line in result.stdout.strip().splitlines():
         parts = line.split(",")
         if len(parts) == 3:
             pods.append({"name": parts[0], "phase": parts[1], "ready": parts[2] == "true"})
-    # Empty pod list means not ready yet, not "all good"
+    # Empty pod list means not scheduled yet — not "all good"
     all_ready = len(pods) > 0 and all(p["ready"] for p in pods)
     return {"namespace": namespace, "pods": pods, "all_ready": all_ready}
 
@@ -221,20 +231,18 @@ def get_pod_status(namespace: str, deployment: str | None = None) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="get_pod_logs")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NexusError])
 def get_pod_logs(namespace: str, deployment: str, tail: int = 100) -> dict:
     rate_limit("k8s")
-    result = _kube(
-        "logs", "-n", namespace, f"deployment/{deployment}", f"--tail={tail}",
-        timeout=30,
-    )
+    result = _kube("logs", "-n", namespace, f"deployment/{deployment}", f"--tail={tail}", timeout=30)
     if result.returncode != 0:
-        return {"deployment": deployment, "logs": "", "lines": 0, "error": result.stderr[:200]}
+        raise NexusError(f"get_pod_logs failed: {result.stderr[:200]}", retryable=True)
     return {"deployment": deployment, "logs": result.stdout, "lines": len(result.stdout.splitlines())}
 
 
 @registry.register(
     name="k8s.wait_for_rollout",
-    description="Block until a Kubernetes deployment rollout is complete (timeout 300s)",
+    description="Block until a Kubernetes deployment rollout is complete",
     input_schema={
         "type": "object",
         "properties": {"namespace": {"type": "string"}, "deployment": {"type": "string"}},
@@ -242,13 +250,14 @@ def get_pod_logs(namespace: str, deployment: str, tail: int = 100) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="wait_for_rollout")
-@retry(max_attempts=3, base_delay_seconds=15.0, retryable_on=[NexusError])
+@retry(max_attempts=3, base_delay_seconds=30.0, retryable_on=[NexusError])
 def wait_for_rollout(namespace: str, deployment: str) -> dict:
     rate_limit("k8s")
-    # subprocess timeout slightly exceeds kubectl's own --timeout so we always get kubectl's error
+    # 600s for kubectl: allows for ECR image pull on cold nodes (can take 8-12 min on first deploy)
+    # subprocess timeout is 660s so Python always receives kubectl's own error message
     result = _kube(
-        "rollout", "status", f"deployment/{deployment}", "-n", namespace, "--timeout=300s",
-        timeout=360,
+        "rollout", "status", f"deployment/{deployment}", "-n", namespace, "--timeout=600s",
+        timeout=660,
     )
     if result.returncode != 0:
         raise NexusError(f"rollout not ready: {result.stderr[:200]}", retryable=True)
@@ -269,11 +278,13 @@ def wait_for_rollout(namespace: str, deployment: str) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="scale_deployment")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NexusError])
 def scale_deployment(namespace: str, deployment: str, replicas: int) -> dict:
     rate_limit("k8s")
     result = _kube("scale", f"deployment/{deployment}", f"--replicas={replicas}", "-n", namespace, timeout=30)
-    return {"deployment": deployment, "replicas": replicas, "scaled": result.returncode == 0,
-            **({"error": result.stderr[:200]} if result.returncode != 0 else {})}
+    if result.returncode != 0:
+        raise NexusError(f"scale_deployment failed: {result.stderr[:200]}", retryable=True)
+    return {"deployment": deployment, "replicas": replicas, "scaled": True}
 
 
 @registry.register(
@@ -314,7 +325,7 @@ def get_ingress_address(namespace: str) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="run_migration_job")
-@retry(max_attempts=2, base_delay_seconds=5.0, retryable_on=[NexusError])
+@retry(max_attempts=3, base_delay_seconds=10.0, retryable_on=[NexusError])
 def run_migration_job(workspace: str, namespace: str, image: str) -> dict:
     rate_limit("k8s")
     jinja = Environment(
@@ -332,14 +343,16 @@ def run_migration_job(workspace: str, namespace: str, image: str) -> dict:
     if apply.returncode != 0:
         raise NexusError(f"migration job apply failed: {apply.stderr[:200]}", retryable=True)
 
-    # --timeout=120s tells kubectl to give up; subprocess timeout is 150s so we always get kubectl's message
+    # 300s for kubectl: large schema migrations with many tables/indexes can take several minutes
+    # subprocess timeout 360s so Python always receives kubectl's own timeout message
     wait = _kube(
         "wait", "--for=condition=complete", "job/backend-migration",
-        "-n", namespace, "--timeout=120s",
-        timeout=150,
+        "-n", namespace, "--timeout=300s",
+        timeout=360,
     )
-    return {"completed": wait.returncode == 0, "namespace": namespace,
-            **({"error": wait.stderr[:200]} if wait.returncode != 0 else {})}
+    if wait.returncode != 0:
+        raise NexusError(f"migration job did not complete: {wait.stderr[:200]}", retryable=True)
+    return {"completed": True, "namespace": namespace}
 
 
 @registry.register(
@@ -352,9 +365,12 @@ def run_migration_job(workspace: str, namespace: str, image: str) -> dict:
     },
 )
 @instrument(namespace="k8s", tool="get_resource_usage")
+@retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NexusError])
 def get_resource_usage(namespace: str) -> dict:
     rate_limit("k8s")
     result = _kube("top", "pods", "-n", namespace, "--no-headers", timeout=30)
+    if result.returncode != 0:
+        raise NexusError(f"kubectl top failed: {result.stderr[:200]}", retryable=True)
     pods = []
     for line in result.stdout.strip().splitlines():
         parts = line.split()

@@ -50,7 +50,7 @@ def build(
     workflow_dir: str = typer.Option("/tmp/nexus-workflow", "--workflow-dir",
                                      help="Root directory for all session files. Each session gets its own "
                                           "subdirectory: <workflow-dir>/<session-id>/"),
-    region: str = typer.Option("us-east-2", help="AWS region"),
+    region: str = typer.Option("us-east-1", help="AWS region"),
     telegram_token: str = typer.Option("", envvar="TELEGRAM_BOT_TOKEN", help="Telegram bot token for alerts"),
     telegram_chat: str = typer.Option("", envvar="TELEGRAM_CHAT_ID", help="Telegram chat ID"),
     dry_run: bool = typer.Option(False, help="Show cost estimate only, do not build"),
