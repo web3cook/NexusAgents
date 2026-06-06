@@ -47,7 +47,9 @@ def _print_cost(console: Console, state) -> None:
 @app.command()
 def build(
     description: str = typer.Argument(..., help="Natural language description of the app to build"),
-    workspace: str = typer.Option("/tmp/nexus-workspace", help="Local workspace directory"),
+    workflow_dir: str = typer.Option("/tmp/nexus-workflow", "--workflow-dir",
+                                     help="Root directory for all session files. Each session gets its own "
+                                          "subdirectory: <workflow-dir>/<session-id>/"),
     region: str = typer.Option("us-east-2", help="AWS region"),
     telegram_token: str = typer.Option("", envvar="TELEGRAM_BOT_TOKEN", help="Telegram bot token for alerts"),
     telegram_chat: str = typer.Option("", envvar="TELEGRAM_CHAT_ID", help="Telegram chat ID"),
@@ -61,10 +63,10 @@ def build(
     setup_logging(level=_LOG_LEVELS[log_level])
     console.print(Panel.fit("[bold blue]NEXUS[/bold blue] — Autonomous App Builder", subtitle="Starting build..."))
     console.print(f"[dim]Description:[/dim] {description}")
-    console.print(f"[dim]Workspace:[/dim] {workspace}")
+    console.print(f"[dim]Workflow dir:[/dim] {workflow_dir}")
     console.print(f"[dim]Region:[/dim] {region}\n")
 
-    Path(workspace).mkdir(parents=True, exist_ok=True)
+    Path(workflow_dir).mkdir(parents=True, exist_ok=True)
 
     if telegram_token and telegram_chat:
         from agent.tools.alert.tools import setup_telegram_bot
@@ -91,8 +93,9 @@ def build(
     want_resume = resume is not None
     explicit_id = resume if resume else None
     try:
-        state = run(user_description=description, workspace=workspace,
+        state = run(user_description=description, workflow_dir=workflow_dir,
                     resume=want_resume, session_id=explicit_id)
+        console.print(f"[dim]Session dir:[/dim] {workflow_dir}/{state.session_id}/")
         if state.deployment_result:
             console.print("\n[bold green]✓ Build complete![/bold green]")
             console.print(f"Frontend: [link]{state.deployment_result.frontend_url}[/link]")

@@ -59,9 +59,14 @@ def _emergency_save(signum=None, frame=None) -> None:
 
 # ── Resume helpers ────────────────────────────────────────────────────────────
 
-def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
-    files = sorted(checkpoint_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0] if files else None
+def _latest_checkpoint(workflow_dir: Path) -> Path | None:
+    """Return the checkpoint.json inside the most recently modified session directory."""
+    checkpoints = sorted(
+        workflow_dir.glob("*/checkpoint.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return checkpoints[0] if checkpoints else None
 
 
 def _phase_from_state(state: BuildState) -> Phase:
@@ -165,25 +170,29 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
 
 def run(
     user_description: str,
-    workspace: str,
-    checkpoint_dir: Path | None = None,
+    workflow_dir: str = "/tmp/nexus-workflow",
     resume: bool = False,
     session_id: str | None = None,
 ) -> BuildState:
+    """Run the build orchestrator.
+
+    All session files (generated code, checkpoint, API spec) are written to:
+        <workflow_dir>/<session-id>/
+    """
     global _active_state, _active_checkpoint
 
-    checkpoint_dir = checkpoint_dir or Path("/tmp/nexus-checkpoints")
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    wf_dir = Path(workflow_dir)
+    wf_dir.mkdir(parents=True, exist_ok=True)
 
     resumed = False
     if resume or session_id:
         if session_id:
-            checkpoint_path = checkpoint_dir / f"{session_id}.json"
+            checkpoint_path = wf_dir / session_id / "checkpoint.json"
             if not checkpoint_path.exists():
-                logger.error("No checkpoint for session %s in %s", session_id, checkpoint_dir)
+                logger.error("No checkpoint for session %s in %s", session_id, wf_dir)
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         else:
-            checkpoint_path = _latest_checkpoint(checkpoint_dir)
+            checkpoint_path = _latest_checkpoint(wf_dir)
             if not checkpoint_path:
                 logger.warning("--resume requested but no checkpoint found — starting fresh")
                 checkpoint_path = None
@@ -194,14 +203,20 @@ def run(
             resumed = True
             logger.info(
                 "[yellow]Resuming session %s from phase %s[/yellow]  [dim](%s)[/dim]",
-                state.session_id, state.current_phase.name, checkpoint_path.name,
+                state.session_id, state.current_phase.name,
+                checkpoint_path.parent.name,
             )
 
     if not resumed:
         session_id = str(uuid.uuid4())[:8]
         set_session_id(session_id)
         state = BuildState(session_id=session_id, user_description=user_description)
-        checkpoint_path = checkpoint_dir / f"{session_id}.json"
+        checkpoint_path = wf_dir / session_id / "checkpoint.json"
+
+    # The session directory is the workspace — all generated files land here
+    session_dir = checkpoint_path.parent
+    session_dir.mkdir(parents=True, exist_ok=True)
+    workspace = str(session_dir)
 
     # Wire emergency save
     _active_state = state
@@ -225,7 +240,7 @@ def run(
 
     build_start = time.monotonic()
     logger.info("[bold]session %s[/bold] — %s", state.session_id, user_description[:100])
-    logger.info("workspace: %s", workspace)
+    logger.info("session dir: %s", session_dir)
 
     messages: list[dict] = [
         {
