@@ -441,6 +441,13 @@ def generate_api_spec(
         }
 
     if "auth" in features:
+        _auth_response_schema = {
+            "type": "object",
+            "properties": {
+                "access_token": {"type": "string"},
+                "token_type": {"type": "string"},
+            },
+        }
         paths.setdefault("/auth/login", {})["post"] = {
             "tags": ["auth"],
             "summary": "POST /auth/login",
@@ -470,18 +477,49 @@ def generate_api_spec(
                 "200": {
                     "description": "JWT token",
                     "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "access_token": {"type": "string"},
-                                    "token_type": {"type": "string"},
-                                },
-                            }
-                        }
+                        "application/json": {"schema": _auth_response_schema}
                     },
                 },
                 "401": {"description": "Invalid credentials"},
+            },
+        }
+        paths.setdefault("/auth/register", {})["post"] = {
+            "tags": ["auth"],
+            "summary": "POST /auth/register",
+            "operationId": "post_auth_register",
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "email": {
+                                    "type": "string",
+                                    "example": "user@example.com",
+                                },
+                                "password": {
+                                    "type": "string",
+                                    "example": "secret",
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "example": "Jane Doe",
+                                },
+                            },
+                            "required": ["email", "password", "name"],
+                        }
+                    }
+                },
+            },
+            "responses": {
+                "201": {
+                    "description": "Account created — returns JWT token",
+                    "content": {
+                        "application/json": {"schema": _auth_response_schema}
+                    },
+                },
+                "400": {"description": "Email already registered"},
             },
         }
 

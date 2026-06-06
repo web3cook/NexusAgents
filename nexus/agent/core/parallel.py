@@ -144,6 +144,7 @@ def _run_agent_subprocess(
     agent_class_path: str,
     app_spec_dict: dict,
     workspace: str,
+    extra_input: dict | None = None,
 ) -> dict:
     """Runs a subagent in a child Python process and returns its result.
 
@@ -151,6 +152,7 @@ def _run_agent_subprocess(
         agent_class_path: Dotted import path to the subagent class.
         app_spec_dict: The app spec serialized as a dict.
         workspace: The root workspace directory.
+        extra_input: Additional key/value pairs to include in input_data.
 
     Returns:
         The subagent's result dict, or an error dict if the child process
@@ -158,12 +160,18 @@ def _run_agent_subprocess(
     """
     root = str(Path(__file__).parent.parent.parent)
     module, class_name = agent_class_path.rsplit(".", 1)
+
+    extra_kvs = ""
+    if extra_input:
+        for k, v in extra_input.items():
+            extra_kvs += f", {k!r}: {v!r}"
+
     script = (
         f"import json, sys; sys.path.insert(0, {root!r})\n"
         f"from {module} import {class_name}\n"
         f"subagent = {class_name}()\n"
         f"result = subagent.run({{'app_spec': {json.dumps(app_spec_dict)!r}, "
-        f"'workspace': {workspace!r}}})\n"
+        f"'workspace': {workspace!r}{extra_kvs}}})\n"
         f"print('__RESULT__' + json.dumps(result))\n"
     )
     proc = subprocess.run(
@@ -195,19 +203,28 @@ def _run_backend_subprocess(app_spec_dict: dict, workspace: str) -> dict:
     )
 
 
-def _run_frontend_subprocess(app_spec_dict: dict, workspace: str) -> dict:
+def _run_frontend_subprocess(
+    app_spec_dict: dict,
+    workspace: str,
+    api_spec_path: str | None = None,
+) -> dict:
     """Runs the frontend builder subagent in a child process.
 
     Args:
         app_spec_dict: The app spec serialized as a dict.
         workspace: The root workspace directory.
+        api_spec_path: Path to the OpenAPI YAML spec, passed to the subagent
+            so it can call code.generate_api_client for spec alignment.
 
     Returns:
         The frontend builder's result dict.
     """
+    extra: dict | None = (
+        {"api_spec_path": api_spec_path} if api_spec_path else None
+    )
     return _run_agent_subprocess(
         "agent.subagents.frontend_builder.FrontendBuilderSubagent",
-        app_spec_dict, workspace,
+        app_spec_dict, workspace, extra,
     )
 
 
@@ -236,10 +253,11 @@ def run_build_parallel(
     state.set_agent_status("FrontendBuilderSubagent", AgentStatus.ONGOING)
     logger.info("  Launching backend + frontend subprocesses in parallel...")
 
+    api_spec_path = getattr(state, "api_spec_path", None)
     with ProcessPoolExecutor(max_workers=2) as pool:
         fut_backend = pool.submit(_run_backend_subprocess, spec_dict, workspace)
         fut_frontend = pool.submit(
-            _run_frontend_subprocess, spec_dict, workspace
+            _run_frontend_subprocess, spec_dict, workspace, api_spec_path
         )
         backend_result = fut_backend.result(timeout=960)
         frontend_result = fut_frontend.result(timeout=960)

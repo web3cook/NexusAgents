@@ -446,9 +446,63 @@ def scaffold_react_project(
         '"dependencies":{"react":"^18","react-dom":"^18",'
         '"react-router-dom":"^6","axios":"^1","recharts":"^2"},'
         '"devDependencies":{"@types/react":"^18","typescript":"^5",'
-        '"vite":"^5","@vitejs/plugin-react":"^4"}}'
+        '"vite":"^5","@vitejs/plugin-react":"^4",'
+        '"tailwindcss":"^3","postcss":"^8","autoprefixer":"^10"}}'
     )
     files.append(_write(workspace, "frontend/package.json", pkg))
+    files.append(_write(
+        workspace, "frontend/tailwind.config.js",
+        "/** @type {import('tailwindcss').Config} */\n"
+        "export default {\n"
+        "  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],\n"
+        "  theme: { extend: {} },\n"
+        "  plugins: [],\n"
+        "}\n",
+    ))
+    files.append(_write(
+        workspace, "frontend/postcss.config.js",
+        "export default {\n"
+        "  plugins: { tailwindcss: {}, autoprefixer: {} },\n"
+        "}\n",
+    ))
+    files.append(_write(
+        workspace, "frontend/src/index.css",
+        "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
+    ))
+    files.append(_write(
+        workspace, "frontend/src/main.tsx",
+        "import React from 'react'\n"
+        "import ReactDOM from 'react-dom/client'\n"
+        "import App from './App'\n"
+        "import './index.css'\n\n"
+        "ReactDOM.createRoot(document.getElementById('root')!).render(\n"
+        "  <React.StrictMode><App /></React.StrictMode>\n"
+        ")\n",
+    ))
+    files.append(_write(
+        workspace, "frontend/index.html",
+        "<!DOCTYPE html>\n"
+        "<html lang=\"en\">\n"
+        "  <head>\n"
+        "    <meta charset=\"UTF-8\" />\n"
+        "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+        f"    <title>{app_name}</title>\n"
+        "  </head>\n"
+        "  <body>\n"
+        "    <div id=\"root\"></div>\n"
+        "    <script type=\"module\" src=\"/src/main.tsx\"></script>\n"
+        "  </body>\n"
+        "</html>\n",
+    ))
+    files.append(_write(
+        workspace, "frontend/vite.config.ts",
+        "import { defineConfig } from 'vite'\n"
+        "import react from '@vitejs/plugin-react'\n\n"
+        "export default defineConfig({\n"
+        "  plugins: [react()],\n"
+        "  server: { proxy: { '/api': 'http://localhost:8000' } },\n"
+        "})\n",
+    ))
     return {
         "files_created": files,
         "dockerfile_path": f"{workspace}/frontend/Dockerfile",
@@ -681,6 +735,319 @@ def scaffold_helm_chart(workspace: str, name: str) -> dict:
     chart = f'apiVersion: v2\nname: {name}\nversion: 0.1.0\n'
     path = _write(workspace, f"helm/{name}/Chart.yaml", chart)
     return {"chart_path": str(Path(path).parent)}
+
+
+def _extract_fields(
+    paths: dict, path: str, method: str
+) -> list[tuple[str, str]]:
+    """Extracts (name, type) pairs from an OpenAPI path's request body."""
+    try:
+        schema = (
+            paths[path][method]["requestBody"]["content"]
+            ["application/json"]["schema"]
+        )
+        return [
+            (name, info.get("type", "string"))
+            for name, info in schema.get("properties", {}).items()
+        ]
+    except (KeyError, TypeError):
+        return []
+
+
+def _gen_api_ts(
+    login_fields: list[tuple[str, str]],
+    register_fields: list[tuple[str, str]],
+) -> str:
+    """Generates a spec-aligned api.ts with typed login/register functions."""
+    ts_type = {"string": "string", "integer": "number", "boolean": "boolean"}
+
+    def iface(name: str, fields: list[tuple[str, str]]) -> str:
+        members = "; ".join(
+            f"{f}: {ts_type.get(t, 'string')}" for f, t in fields
+        )
+        return f"export interface {name} {{ {members} }}"
+
+    login_iface = iface("LoginRequest", login_fields)
+    register_iface = iface("RegisterRequest", register_fields)
+
+    return (
+        "import axios from 'axios'\n\n"
+        "const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'\n"
+        "export const api = axios.create({ baseURL: BASE_URL })\n\n"
+        "api.interceptors.request.use(config => {\n"
+        "  const token = localStorage.getItem('nexus_token')\n"
+        "  if (token) config.headers.Authorization = `Bearer ${token}`\n"
+        "  return config\n"
+        "})\n\n"
+        "api.interceptors.response.use(\n"
+        "  r => r,\n"
+        "  err => {\n"
+        "    if (err.response?.status === 401) {\n"
+        "      localStorage.removeItem('nexus_token')\n"
+        "      window.location.href = '/login'\n"
+        "    }\n"
+        "    return Promise.reject(err)\n"
+        "  }\n"
+        ")\n\n"
+        f"{login_iface}\n"
+        f"{register_iface}\n"
+        "export interface AuthResponse { access_token: string; token_type: string }\n\n"
+        "export async function loginApi(data: LoginRequest): Promise<AuthResponse> {\n"
+        "  const r = await api.post<AuthResponse>('/auth/login', data)\n"
+        "  return r.data\n"
+        "}\n\n"
+        "export async function registerApi(data: RegisterRequest): Promise<AuthResponse> {\n"
+        "  const r = await api.post<AuthResponse>('/auth/register', data)\n"
+        "  return r.data\n"
+        "}\n"
+    )
+
+
+def _gen_auth_context(
+    login_fields: list[tuple[str, str]],
+    register_fields: list[tuple[str, str]],
+) -> str:
+    """Generates AuthContext.tsx using typed loginApi/registerApi."""
+    login_params = ", ".join(f"{f}: string" for f, _ in login_fields)
+    login_obj = ", ".join(f for f, _ in login_fields)
+    register_params = ", ".join(f"{f}: string" for f, _ in register_fields)
+    register_obj = ", ".join(f for f, _ in register_fields)
+
+    return (
+        "import { createContext, useContext, useState, ReactNode } from 'react'\n"
+        "import { loginApi, registerApi } from '../lib/api'\n\n"
+        "interface AuthContextType {\n"
+        "  isAuthenticated: boolean\n"
+        f"  login: ({login_params}) => Promise<void>\n"
+        f"  register: ({register_params}) => Promise<void>\n"
+        "  logout: () => void\n"
+        "}\n\n"
+        "const AuthContext = createContext<AuthContextType | null>(null)\n\n"
+        "export function AuthProvider({ children }: { children: ReactNode }) {\n"
+        "  const [isAuthenticated, setIsAuthenticated] = useState(\n"
+        "    !!localStorage.getItem('nexus_token')\n"
+        "  )\n\n"
+        f"  const login = async ({login_params}) => {{\n"
+        f"    const r = await loginApi({{ {login_obj} }})\n"
+        "    localStorage.setItem('nexus_token', r.access_token)\n"
+        "    setIsAuthenticated(true)\n"
+        "  }\n\n"
+        f"  const register = async ({register_params}) => {{\n"
+        f"    const r = await registerApi({{ {register_obj} }})\n"
+        "    localStorage.setItem('nexus_token', r.access_token)\n"
+        "    setIsAuthenticated(true)\n"
+        "  }\n\n"
+        "  const logout = () => {\n"
+        "    localStorage.removeItem('nexus_token')\n"
+        "    setIsAuthenticated(false)\n"
+        "  }\n\n"
+        "  return (\n"
+        "    <AuthContext.Provider value={{ isAuthenticated, login, register, logout }}>\n"
+        "      {children}\n"
+        "    </AuthContext.Provider>\n"
+        "  )\n"
+        "}\n\n"
+        "export function useAuth() {\n"
+        "  const ctx = useContext(AuthContext)\n"
+        "  if (!ctx) throw new Error('useAuth must be used within AuthProvider')\n"
+        "  return ctx\n"
+        "}\n"
+    )
+
+
+def _gen_login_tsx(login_fields: list[tuple[str, str]]) -> str:
+    """Generates Login.tsx with state variables and inputs for each field."""
+    state_lines = "\n".join(
+        f"  const [{f}, set{f.capitalize()}] = useState('')" for f, _ in login_fields
+    )
+    input_lines = "\n".join(
+        f"        <input\n"
+        f"          className=\"w-full border border-gray-300 p-2 mb-4 rounded"
+        f" focus:outline-none focus:ring-2 focus:ring-blue-500\"\n"
+        f"          type=\"{'password' if f == 'password' else 'email' if f == 'email' else 'text'}\"\n"
+        f"          placeholder=\"{f.capitalize()}\"\n"
+        f"          value={{{f}}}\n"
+        f"          onChange={{e => set{f.capitalize()}(e.target.value)}}\n"
+        f"          required\n"
+        f"        />"
+        for f, _ in login_fields
+    )
+    call_args = ", ".join(f for f, _ in login_fields)
+
+    return (
+        "import { useState } from 'react'\n"
+        "import { useNavigate, Link } from 'react-router-dom'\n"
+        "import { useAuth } from '../contexts/AuthContext'\n\n"
+        "export default function Login() {\n"
+        "  const { login } = useAuth()\n"
+        "  const navigate = useNavigate()\n"
+        f"{state_lines}\n"
+        "  const [error, setError] = useState('')\n\n"
+        "  const handleSubmit = async (e: React.FormEvent) => {\n"
+        "    e.preventDefault()\n"
+        "    try {\n"
+        f"      await login({call_args})\n"
+        "      navigate('/')\n"
+        "    } catch {\n"
+        "      setError('Invalid credentials')\n"
+        "    }\n"
+        "  }\n\n"
+        "  return (\n"
+        "    <div className=\"min-h-screen flex items-center justify-center bg-gray-50\">\n"
+        "      <form onSubmit={handleSubmit} className=\"bg-white p-8 rounded-lg shadow-md w-96\">\n"
+        "        <h1 className=\"text-2xl font-bold mb-6 text-gray-900\">Sign In</h1>\n"
+        "        {error && <p className=\"text-red-500 mb-4 text-sm\">{error}</p>}\n"
+        f"{input_lines}\n"
+        "        <button\n"
+        "          className=\"w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 mt-2\"\n"
+        "          type=\"submit\"\n"
+        "        >\n"
+        "          Sign In\n"
+        "        </button>\n"
+        "        <p className=\"text-center mt-4 text-sm text-gray-600\">\n"
+        "          <Link to=\"/register\" className=\"text-blue-600 hover:underline\">Create account</Link>\n"
+        "        </p>\n"
+        "      </form>\n"
+        "    </div>\n"
+        "  )\n"
+        "}\n"
+    )
+
+
+def _gen_register_tsx(register_fields: list[tuple[str, str]]) -> str:
+    """Generates Register.tsx with state variables and inputs for each field."""
+    state_lines = "\n".join(
+        f"  const [{f}, set{f.capitalize()}] = useState('')" for f, _ in register_fields
+    )
+    input_lines = "\n".join(
+        f"        <input\n"
+        f"          className=\"w-full border border-gray-300 p-2 mb-4 rounded"
+        f" focus:outline-none focus:ring-2 focus:ring-blue-500\"\n"
+        f"          type=\"{'password' if f == 'password' else 'email' if f == 'email' else 'text'}\"\n"
+        f"          placeholder=\"{f.replace('_', ' ').capitalize()}\"\n"
+        f"          value={{{f}}}\n"
+        f"          onChange={{e => set{f.capitalize()}(e.target.value)}}\n"
+        f"          required\n"
+        f"        />"
+        for f, _ in register_fields
+    )
+    call_args = ", ".join(f for f, _ in register_fields)
+
+    return (
+        "import { useState } from 'react'\n"
+        "import { useNavigate, Link } from 'react-router-dom'\n"
+        "import { useAuth } from '../contexts/AuthContext'\n\n"
+        "export default function Register() {\n"
+        "  const { register } = useAuth()\n"
+        "  const navigate = useNavigate()\n"
+        f"{state_lines}\n"
+        "  const [error, setError] = useState('')\n\n"
+        "  const handleSubmit = async (e: React.FormEvent) => {\n"
+        "    e.preventDefault()\n"
+        "    try {\n"
+        f"      await register({call_args})\n"
+        "      navigate('/')\n"
+        "    } catch {\n"
+        "      setError('Registration failed — email may already be in use')\n"
+        "    }\n"
+        "  }\n\n"
+        "  return (\n"
+        "    <div className=\"min-h-screen flex items-center justify-center bg-gray-50\">\n"
+        "      <form onSubmit={handleSubmit} className=\"bg-white p-8 rounded-lg shadow-md w-96\">\n"
+        "        <h1 className=\"text-2xl font-bold mb-6 text-gray-900\">Create Account</h1>\n"
+        "        {error && <p className=\"text-red-500 mb-4 text-sm\">{error}</p>}\n"
+        f"{input_lines}\n"
+        "        <button\n"
+        "          className=\"w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 mt-2\"\n"
+        "          type=\"submit\"\n"
+        "        >\n"
+        "          Create Account\n"
+        "        </button>\n"
+        "        <p className=\"text-center mt-4 text-sm text-gray-600\">\n"
+        "          Already have an account?{' '}\n"
+        "          <Link to=\"/login\" className=\"text-blue-600 hover:underline\">Sign in</Link>\n"
+        "        </p>\n"
+        "      </form>\n"
+        "    </div>\n"
+        "  )\n"
+        "}\n"
+    )
+
+
+@registry.register(
+    name="code.generate_api_client",
+    description=(
+        "Parse the OpenAPI spec and generate spec-aligned TypeScript auth "
+        "files (api.ts, AuthContext.tsx, Login.tsx, Register.tsx)"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "workspace": {"type": "string"},
+            "api_spec_path": {"type": "string"},
+        },
+        "required": ["workspace", "api_spec_path"],
+    },
+)
+@instrument(namespace="code", tool="generate_api_client")
+def generate_api_client(workspace: str, api_spec_path: str) -> dict:
+    """Parses OpenAPI YAML and overwrites auth TypeScript files to match spec.
+
+    Reads field names and types directly from the spec so frontend code
+    cannot diverge from the backend contract.  Overwrites:
+      frontend/src/lib/api.ts
+      frontend/src/contexts/AuthContext.tsx
+      frontend/src/pages/Login.tsx
+      frontend/src/pages/Register.tsx
+
+    Args:
+        workspace: The root workspace directory.
+        api_spec_path: Absolute path to the openapi.yaml file.
+
+    Returns:
+        A dict with files_created, login_fields, and register_fields.
+    """
+    import yaml as _yaml
+
+    rate_limit("code")
+    spec = _yaml.safe_load(Path(api_spec_path).read_text(encoding="utf-8"))
+    paths = spec.get("paths", {})
+
+    login_fields = _extract_fields(paths, "/auth/login", "post")
+    if not login_fields:
+        login_fields = [("email", "string"), ("password", "string")]
+
+    register_fields = _extract_fields(paths, "/auth/register", "post")
+    if not register_fields:
+        register_fields = [
+            ("email", "string"),
+            ("password", "string"),
+            ("name", "string"),
+        ]
+
+    files = [
+        _write(
+            workspace, "frontend/src/lib/api.ts",
+            _gen_api_ts(login_fields, register_fields),
+        ),
+        _write(
+            workspace, "frontend/src/contexts/AuthContext.tsx",
+            _gen_auth_context(login_fields, register_fields),
+        ),
+        _write(
+            workspace, "frontend/src/pages/Login.tsx",
+            _gen_login_tsx(login_fields),
+        ),
+        _write(
+            workspace, "frontend/src/pages/Register.tsx",
+            _gen_register_tsx(register_fields),
+        ),
+    ]
+    return {
+        "files_created": files,
+        "login_fields": login_fields,
+        "register_fields": register_fields,
+    }
 
 
 @registry.register(
