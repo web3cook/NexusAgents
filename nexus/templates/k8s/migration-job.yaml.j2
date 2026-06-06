@@ -15,6 +15,6 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ namespace }}-secrets
-                  key: database_url
+                  key: database-url
       restartPolicy: Never
   backoffLimit: 3

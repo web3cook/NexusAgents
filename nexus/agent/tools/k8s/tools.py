@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 import subprocess
+import time
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 from agent.tools.registry import registry
@@ -328,6 +330,18 @@ def get_ingress_address(namespace: str) -> dict:
 @retry(max_attempts=3, base_delay_seconds=10.0, retryable_on=[NexusError])
 def run_migration_job(workspace: str, namespace: str, image: str) -> dict:
     rate_limit("k8s")
+    JOB_NAME = "backend-migration"
+
+    # If the job already completed successfully, skip re-running it
+    check = _kube(
+        "get", "job", JOB_NAME, "-n", namespace,
+        "-o", r"jsonpath={.status.conditions[?(@.type=='Complete')].status}",
+        timeout=15,
+    )
+    if check.returncode == 0 and check.stdout.strip() == "True":
+        return {"completed": True, "namespace": namespace, "skipped": True}
+
+    # Render manifest
     jinja = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR / "k8s")),
         trim_blocks=True, lstrip_blocks=True,
@@ -339,20 +353,42 @@ def run_migration_job(workspace: str, namespace: str, image: str) -> dict:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(manifest)
 
+    # Jobs are immutable once created — delete any existing one first
+    _kube("delete", "job", JOB_NAME, "-n", namespace, "--ignore-not-found=true", timeout=30)
+
     apply = _kube("apply", "-f", str(manifest_path), timeout=60)
     if apply.returncode != 0:
         raise NexusError(f"migration job apply failed: {apply.stderr[:200]}", retryable=True)
 
-    # 300s for kubectl: large schema migrations with many tables/indexes can take several minutes
-    # subprocess timeout 360s so Python always receives kubectl's own timeout message
-    wait = _kube(
-        "wait", "--for=condition=complete", "job/backend-migration",
-        "-n", namespace, "--timeout=300s",
-        timeout=360,
-    )
-    if wait.returncode != 0:
-        raise NexusError(f"migration job did not complete: {wait.stderr[:200]}", retryable=True)
-    return {"completed": True, "namespace": namespace}
+    # Poll for Complete or Failed (up to 5 min) — kubectl wait only supports one
+    # condition at a time, so polling lets us detect failure early instead of
+    # waiting the full timeout when alembic exits non-zero.
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        status = _kube(
+            "get", "job", JOB_NAME, "-n", namespace,
+            "-o", r"jsonpath={.status.conditions}",
+            timeout=15,
+        )
+        if status.returncode == 0 and status.stdout.strip():
+            try:
+                for cond in json.loads(status.stdout):
+                    if cond.get("type") == "Complete" and cond.get("status") == "True":
+                        return {"completed": True, "namespace": namespace}
+                    if cond.get("type") == "Failed" and cond.get("status") == "True":
+                        logs = _kube(
+                            "logs", "-n", namespace, f"-l job-name={JOB_NAME}", "--tail=50",
+                            timeout=20,
+                        )
+                        raise NexusError(
+                            f"migration job failed — alembic logs: {logs.stdout[-400:] or logs.stderr[-200:]}",
+                            retryable=False,
+                        )
+            except (json.JSONDecodeError, KeyError):
+                pass
+        time.sleep(5)
+
+    raise NexusError("migration job timed out after 300s", retryable=True)
 
 
 @registry.register(
