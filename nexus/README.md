@@ -75,6 +75,24 @@ For real deployments you also need:
 - `kubectl` installed for Kubernetes operations
 - Docker daemon running for image builds
 
+### AWS MCP (optional)
+
+A project-level `.mcp.json` at the repo root configures the [AWS MCP server](https://aws-mcp.us-east-1.api.aws/mcp) for Claude Code. This gives you direct AWS tool access in Claude Code sessions without leaving the editor — useful for inspecting resources, debugging deployments, and running ad-hoc AWS operations while developing Nexus.
+
+```json
+// .mcp.json (already present at repo root)
+{
+  "mcpServers": {
+    "aws": {
+      "type": "http",
+      "url": "https://aws-mcp.us-east-1.api.aws/mcp"
+    }
+  }
+}
+```
+
+The MCP server reads credentials from the same sources as the AWS CLI: `~/.aws/credentials`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` environment variables, or an IAM instance profile. No extra configuration is needed if `aws configure` is already set up.
+
 ---
 
 ## Running tests
