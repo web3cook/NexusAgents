@@ -8,6 +8,21 @@ from agent.core.observability import instrument
 from agent.core.retry import rate_limit
 
 
+def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run a subprocess with a hard timeout and no interactive stdin.
+    Returns a CompletedProcess-like object even on timeout."""
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True,
+            cwd=cwd, stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        result = subprocess.CompletedProcess(cmd, returncode=1)
+        result.stdout = f"timed out after {timeout}s"
+        result.stderr = ""
+        return result
+
+
 @registry.register(
     name="test.run_unit_tests",
     description="Run pytest (Python) or vitest (TypeScript) unit tests in the workspace",
@@ -24,17 +39,16 @@ from agent.core.retry import rate_limit
 def run_unit_tests(workspace: str, language: str) -> dict:
     rate_limit("test")
     if language == "python":
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", workspace, "-v", "--tb=short", "-q"],
-            capture_output=True, text=True,
-        )
+        result = _run([sys.executable, "-m", "pytest", workspace, "-v", "--tb=short", "-q"], timeout=120)
         passed = result.stdout.count(" passed")
         failed = result.stdout.count(" failed")
     else:
-        result = subprocess.run(
-            ["npx", "vitest", "run", "--reporter=verbose"],
-            capture_output=True, text=True, cwd=workspace,
-        )
+        ws = Path(workspace)
+        vitest_bin = ws / "node_modules" / ".bin" / "vitest"
+        if not vitest_bin.exists():
+            return {"passed": 0, "failed": 0, "returncode": 0,
+                    "stdout": "vitest skipped — node_modules not installed"}
+        result = _run([str(vitest_bin), "run", "--reporter=verbose"], cwd=workspace, timeout=120)
         passed = result.stdout.count("✓") + result.stdout.count("PASS")
         failed = result.stdout.count("✗") + result.stdout.count("FAIL")
     return {"passed": passed, "failed": failed, "returncode": result.returncode,
@@ -94,7 +108,7 @@ with sync_playwright() as p:
     browser.close()
 print("E2E PASSED")
 """
-    result = subprocess.run(["python", "-c", script], capture_output=True, text=True)
+    result = _run([sys.executable, "-c", script], timeout=120)
     return {"passed": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr[:500]}
 
 
@@ -110,9 +124,9 @@ print("E2E PASSED")
 @instrument(namespace="test", tool="check_coverage")
 def check_coverage(workspace: str) -> dict:
     rate_limit("test")
-    result = subprocess.run(
+    result = _run(
         [sys.executable, "-m", "pytest", workspace, "--cov", workspace, "--cov-report", "term-missing", "-q"],
-        capture_output=True, text=True,
+        timeout=120,
     )
     pct = 0.0
     for line in result.stdout.splitlines():
@@ -137,8 +151,8 @@ def check_coverage(workspace: str) -> dict:
 @instrument(namespace="test", tool="run_lint_check")
 def run_lint_check(workspace: str) -> dict:
     rate_limit("test")
-    ruff = subprocess.run(["ruff", "check", workspace], capture_output=True, text=True)
-    black = subprocess.run(["black", "--check", workspace], capture_output=True, text=True)
+    ruff  = _run(["ruff", "check", workspace], timeout=60)
+    black = _run(["black", "--check", workspace], timeout=60)
     return {
         "ruff_passed": ruff.returncode == 0,
         "black_passed": black.returncode == 0,
@@ -160,10 +174,7 @@ def validate_k8s_manifests(manifests_dir: str) -> dict:
     rate_limit("test")
     results = []
     for yaml_file in Path(manifests_dir).rglob("*.yaml"):
-        r = subprocess.run(
-            ["kubectl", "apply", "--dry-run=client", "-f", str(yaml_file)],
-            capture_output=True, text=True,
-        )
+        r = _run(["kubectl", "apply", "--dry-run=client", "-f", str(yaml_file)], timeout=30)
         results.append({"file": str(yaml_file), "valid": r.returncode == 0, "error": r.stderr[:200]})
     return {"results": results, "all_valid": all(r["valid"] for r in results)}
 

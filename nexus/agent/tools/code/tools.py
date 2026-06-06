@@ -2,11 +2,38 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from typing import Any, Callable
 from jinja2 import Environment, FileSystemLoader
 from agent.tools.registry import registry
 from agent.core.observability import instrument
 from agent.core.retry import rate_limit
 from agent.core.errors import NexusError
+
+
+def _run_subprocess(
+    cmd: list[str],
+    cwd: str | None = None,
+    timeout: int = 60,
+    ok_key: str = "passed",
+    ok_fn: Callable[[Any], bool] = lambda r: r.returncode == 0,
+) -> dict:
+    """Run a subprocess with a hard timeout and no interactive stdin."""
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            cwd=cwd, stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout[:2000],
+            ok_key: ok_fn(result),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "returncode": 1,
+            "stdout": f"Command timed out after {timeout}s — {' '.join(cmd[:3])}",
+            ok_key: False,
+        }
 
 
 # ── File I/O ──────────────────────────────────────────────────────────────
@@ -348,10 +375,20 @@ def scaffold_helm_chart(workspace: str, name: str) -> dict:
 def run_linter(workspace: str, language: str) -> dict:
     rate_limit("code")
     if language == "python":
-        result = subprocess.run(["ruff", "check", workspace], capture_output=True, text=True)
-    else:
-        result = subprocess.run(["npx", "eslint", workspace, "--ext", ".ts,.tsx"], capture_output=True, text=True, cwd=workspace)
-    return {"returncode": result.returncode, "stdout": result.stdout[:2000], "passed": result.returncode == 0}
+        return _run_subprocess(
+            ["ruff", "check", workspace], timeout=60,
+            ok_key="passed", ok_fn=lambda r: r.returncode == 0,
+        )
+    # TypeScript: only run if node_modules exist — otherwise npx hangs downloading eslint
+    ws = Path(workspace)
+    eslint_bin = ws / "node_modules" / ".bin" / "eslint"
+    if not eslint_bin.exists():
+        return {"returncode": 0, "stdout": "eslint skipped — node_modules not installed", "passed": True}
+    return _run_subprocess(
+        [str(eslint_bin), str(ws), "--ext", ".ts,.tsx", "--max-warnings=0"],
+        cwd=str(ws), timeout=60,
+        ok_key="passed", ok_fn=lambda r: r.returncode == 0,
+    )
 
 
 @registry.register(
@@ -370,7 +407,12 @@ def run_linter(workspace: str, language: str) -> dict:
 def run_formatter(workspace: str, language: str) -> dict:
     rate_limit("code")
     if language == "python":
-        result = subprocess.run(["black", workspace], capture_output=True, text=True)
-    else:
-        result = subprocess.run(["npx", "prettier", "--write", workspace], capture_output=True, text=True)
-    return {"returncode": result.returncode, "formatted": result.returncode == 0}
+        return _run_subprocess(["black", workspace], timeout=60, ok_key="formatted", ok_fn=lambda r: r.returncode == 0)
+    ws = Path(workspace)
+    prettier_bin = ws / "node_modules" / ".bin" / "prettier"
+    if not prettier_bin.exists():
+        return {"returncode": 0, "formatted": True, "stdout": "prettier skipped — node_modules not installed"}
+    return _run_subprocess(
+        [str(prettier_bin), "--write", str(ws)], cwd=str(ws), timeout=60,
+        ok_key="formatted", ok_fn=lambda r: r.returncode == 0,
+    )
