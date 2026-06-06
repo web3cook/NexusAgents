@@ -8,17 +8,17 @@ Nexus is an autonomous full-stack application builder. Give it a plain-English d
 
 ## How it works
 
-A parent Claude agent (`claude-opus-4-8`) owns a `BuildState` and drives five specialized subagents through six sequential phases:
+A parent Claude agent (`claude-opus-4-8`) owns a `BuildState` and drives five specialized subagents through seven sequential phases:
 
 ```
-PLANNING → BACKEND → FRONTEND → INFRA → TEST → MONITORING
+PLANNING → API_SPEC → BUILD → INFRA → TEST → MONITORING → COMPLETE
 ```
 
-Each phase uses only the tools it needs. The parent can't accidentally call a Kubernetes tool during planning, or a scaffolding tool during deployment. Tool namespaces are enforced per-phase.
+`API_SPEC` and `BUILD` are deterministic (no LLM call): the orchestrator generates the OpenAPI spec directly from the parsed `AppSpec`, then runs backend and frontend scaffolding in parallel via `ProcessPoolExecutor`. Every other phase runs its own subagent. Tool namespaces are enforced per-phase — the parent can't call a Kubernetes tool during planning, or a scaffolding tool during deployment.
 
 ```
 69 tools across 8 namespaces
-├── plan.*      — analyze spec, estimate cost, render summary
+├── plan.*      — analyze spec, generate OpenAPI spec, estimate cost, render summary
 ├── code.*      — file I/O + scaffold FastAPI/React/K8s from Jinja2 templates
 ├── docker.*    — build, tag, push images to ECR
 ├── aws.*       — ECR, EKS, RDS, S3, CloudFront, CloudWatch, IAM
@@ -27,6 +27,14 @@ Each phase uses only the tools it needs. The parent can't accidentally call a Ku
 ├── alert.*     — Telegram bot, alert rules, log parsing, silencing
 └── subagent.*  — spawn Planner, BackendBuilder, FrontendBuilder, Infra, Alerting
 ```
+
+### Model selection
+
+| Role | Model | Reason |
+|---|---|---|
+| Orchestrator | `claude-opus-4-8` | Drives all phases, highest reasoning |
+| BackendBuilder, FrontendBuilder, Infra | `claude-sonnet-4-6` | Code generation, balanced speed/quality |
+| Planner, Alerting | `claude-haiku-4-5-20251001` | Structured extraction, fast + cheap |
 
 ---
 
@@ -82,7 +90,7 @@ pytest tests/integration/ -v
 pytest -v
 ```
 
-Expected: **75 tests passing**.
+Expected: **100 tests passing** (96 unit, 4 integration).
 
 ---
 
@@ -96,7 +104,7 @@ nexus build "Build a SaaS app with user login and a billing dashboard" --dry-run
 
 # Full build and deploy to AWS
 nexus build "Build a SaaS app with user login and a billing dashboard" \
-  --workspace /tmp/my-app \
+  --workflow-dir /tmp/nexus-workflow \
   --region us-east-1
 
 # With Telegram alerts
@@ -104,8 +112,22 @@ nexus build "Build a task manager with projects, tasks, and team members" \
   --telegram-token "$TELEGRAM_BOT_TOKEN" \
   --telegram-chat "$TELEGRAM_CHAT_ID"
 
-# Resume an interrupted build from the last checkpoint
+# Resume the most recent interrupted session
 nexus build "Build a SaaS app..." --resume
+
+# Resume a specific session by ID
+nexus build "Build a SaaS app..." --resume f33bd627
+```
+
+Each session gets its own directory under `--workflow-dir`:
+
+```
+/tmp/nexus-workflow/
+└── f33bd627/                  ← session ID (printed when build starts)
+    ├── checkpoint.json        ← full BuildState, updated after every phase
+    ├── backend/               ← generated FastAPI app
+    ├── frontend/              ← generated React app
+    └── k8s/                   ← rendered Kubernetes manifests
 ```
 
 ### `nexus eval-cmd` — run the eval harness in mock mode
@@ -184,6 +206,25 @@ Output:
 ╚══════════════════════════════════════╝
 ```
 
+### Real cost tracking
+
+After a real build, Nexus prints an itemized LLM cost breakdown using actual token counts from the Anthropic API (including prompt cache hits):
+
+```
+Cost breakdown:
+  Total LLM cost: $0.3821
+  Input tokens:   48,200
+  Output tokens:  12,400
+  Cache reads:    210,000
+  API calls:      34
+  By model:
+    claude-haiku-4-5-20251001: $0.0142 (8 calls)
+    claude-opus-4-8:           $0.2109 (14 calls)
+    claude-sonnet-4-6:          $0.1570 (12 calls)
+```
+
+The same data is persisted in `checkpoint.json` under `cost_tracking` so interrupted sessions preserve the running total.
+
 ---
 
 ## Project structure
@@ -192,29 +233,31 @@ Output:
 nexus/
 ├── agent/
 │   ├── core/
-│   │   ├── state.py          # BuildState + phase enums + manifest dataclasses
+│   │   ├── state.py          # BuildState + phase/agent enums + manifest dataclasses
 │   │   ├── errors.py         # NexusError hierarchy
+│   │   ├── cost.py           # per-model token pricing + compute_cost()
+│   │   ├── parallel.py       # ProcessPoolExecutor BUILD phase + Jinja2 pre-rendering
 │   │   ├── retry.py          # exponential backoff + token-bucket rate limiting
 │   │   ├── observability.py  # JSON structured logging decorator
 │   │   ├── context.py        # phase compression + message summarisation
 │   │   └── orchestrator.py   # parent agent loop
 │   ├── subagents/
-│   │   ├── base.py           # BaseSubagent (tool-scoped Anthropic API loop)
-│   │   ├── planner.py
-│   │   ├── backend_builder.py
-│   │   ├── frontend_builder.py
-│   │   ├── infra.py
-│   │   └── alerting.py       # persistent polling subagent
+│   │   ├── base.py           # BaseSubagent (tool-scoped Anthropic API loop + cost tracking)
+│   │   ├── planner.py        # haiku
+│   │   ├── backend_builder.py # sonnet
+│   │   ├── frontend_builder.py # sonnet
+│   │   ├── infra.py          # sonnet
+│   │   └── alerting.py       # haiku — persistent polling subagent
 │   └── tools/
 │       ├── registry.py       # ToolRegistry singleton
-│       ├── plan/tools.py
+│       ├── plan/tools.py     # analyze_spec, generate_api_spec, estimate_*, render_summary
 │       ├── code/tools.py
-│       ├── docker/tools.py
-│       ├── aws/tools.py
-│       ├── k8s/tools.py
+│       ├── docker/tools.py   # _docker() helper, retry=3, realistic timeouts
+│       ├── aws/tools.py      # retry=3, idempotency on all create_* tools
+│       ├── k8s/tools.py      # _kube() helper, retry=3, realistic timeouts
 │       ├── test/tools.py
 │       ├── alert/tools.py
-│       └── subagent/tools.py
+│       └── subagent/tools.py # status callbacks → checkpoint on every status change
 ├── templates/
 │   ├── fastapi/              # main.py, model, route, auth, admin, Dockerfile
 │   ├── react/                # App.tsx, AuthContext, api.ts, Login, AdminDashboard, Dockerfile
@@ -223,7 +266,7 @@ nexus/
 │   ├── harness.py            # Check.* assertions + run_eval()
 │   └── cases/basic_saas.py   # reference eval case
 ├── tests/
-│   ├── unit/                 # 71 tests (no external deps)
+│   ├── unit/                 # 96 tests (no external deps)
 │   └── integration/          # 4 tests (moto for mock AWS)
 ├── cli.py
 ├── MEMO.md                   # design decisions and trade-offs
