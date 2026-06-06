@@ -1,8 +1,13 @@
+"""The infrastructure subagent that provisions AWS and deploys to K8s."""
+
 from agent.subagents.base import BaseSubagent
 
 
 class InfraSubagent(BaseSubagent):
+    """Provisions AWS infrastructure and deploys the app to Kubernetes."""
+
     def __init__(self):
+        """Initializes the provisioner with its prompt, namespaces, model."""
         super().__init__(
             name="InfraSubagent",
             system_prompt="""You are the Nexus Infrastructure Provisioner. Given ECR image URIs and an AppSpec, provision AWS infrastructure and deploy the app to Kubernetes.

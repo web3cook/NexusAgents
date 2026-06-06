@@ -1,22 +1,26 @@
+"""Planning tools that estimate cost and generate the API spec."""
+
 from __future__ import annotations
+
 import os
-from agent.tools.registry import registry
+
 from agent.core.observability import instrument
 from agent.core.retry import rate_limit
+from agent.tools.registry import registry
 
-# USD per token (not per million)
+# USD per token (not per million).
 _PRICING = {
-    "claude-opus-4-8":   {"input": 15 / 1_000_000,  "output": 75 / 1_000_000},
-    "claude-sonnet-4-6": {"input": 3  / 1_000_000,  "output": 15 / 1_000_000},
+    "claude-opus-4-8": {"input": 15 / 1_000_000, "output": 75 / 1_000_000},
+    "claude-sonnet-4-6": {"input": 3 / 1_000_000, "output": 15 / 1_000_000},
 }
 
 AWS_BASE_COSTS = {
-    "eks_monthly_usd":        73.0,   # EKS control plane
-    "ecr_monthly_usd":        2.0,
+    "eks_monthly_usd": 73.0,  # EKS control plane.
+    "ecr_monthly_usd": 2.0,
     "cloudfront_monthly_usd": 5.0,
-    "s3_monthly_usd":         1.0,
-    "rds_monthly_usd":        25.0,   # db.t3.micro
-    "data_transfer_usd":      5.0,
+    "s3_monthly_usd": 1.0,
+    "rds_monthly_usd": 25.0,  # db.t3.micro.
+    "data_transfer_usd": 5.0,
 }
 
 STEP_SEQUENCE = [
@@ -40,7 +44,10 @@ STEP_SEQUENCE = [
 
 @registry.register(
     name="plan.analyze_spec",
-    description="Parse user description and extract app features, data models, API routes, and pages",
+    description=(
+        "Parse user description and extract app features, data models, "
+        "API routes, and pages"
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -51,6 +58,18 @@ STEP_SEQUENCE = [
 )
 @instrument(namespace="plan", tool="analyze_spec")
 def analyze_spec(user_description: str) -> dict:
+    """Extracts features, models, routes, and pages from a description.
+
+    Uses simple keyword matching and falls back to a generic CRUD spec
+    when no known keyword is present.
+
+    Args:
+        user_description: The natural-language app description.
+
+    Returns:
+        A dict with features, db_models, api_routes, pages, auth_required,
+        and admin_dashboard.
+    """
     rate_limit("plan")
     desc = user_description.lower()
     features, db_models, api_routes, pages = [], [], [], []
@@ -95,7 +114,10 @@ def analyze_spec(user_description: str) -> dict:
 
 @registry.register(
     name="plan.estimate_steps",
-    description="Estimate total agent steps for the build based on feature and model count",
+    description=(
+        "Estimate total agent steps for the build based on feature and "
+        "model count"
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -107,6 +129,15 @@ def analyze_spec(user_description: str) -> dict:
 )
 @instrument(namespace="plan", tool="estimate_steps")
 def estimate_steps(feature_count: int, model_count: int) -> dict:
+    """Estimates total build steps from feature and model counts.
+
+    Args:
+        feature_count: Number of features in the spec.
+        model_count: Number of data models in the spec.
+
+    Returns:
+        A dict with the total step count and the base step breakdown.
+    """
     rate_limit("plan")
     base = len(STEP_SEQUENCE)
     extra = max(0, (feature_count - 1) * 2 + (model_count - 1) * 2)
@@ -128,26 +159,37 @@ def estimate_steps(feature_count: int, model_count: int) -> dict:
 )
 @instrument(namespace="plan", tool="estimate_tokens")
 def estimate_tokens(steps: int, avg_tokens_per_step: int = 6000) -> dict:
+    """Estimates total LLM token usage and cost in USD.
+
+    Args:
+        steps: Estimated number of build steps.
+        avg_tokens_per_step: Average tokens per step; currently unused but
+            kept for signature stability.
+
+    Returns:
+        A dict with total_tokens, cost_usd, and a per-component breakdown.
+    """
     rate_limit("plan")
-    # --- Orchestrator (claude-opus-4-8) ---
-    # ~12 turns; each turn carries system prompt + 69 tools + history ≈ 40K input, 3K output
+    # Orchestrator (claude-opus-4-8): roughly 12 turns, each carrying the
+    # system prompt, tools, and history at about 40K input and 3K output.
     orch_turns = max(12, steps // 3)
-    orch_in  = orch_turns * 40_000
+    orch_in = orch_turns * 40_000
     orch_out = orch_turns * 3_000
     opus = _PRICING["claude-opus-4-8"]
     orch_cost = orch_in * opus["input"] + orch_out * opus["output"]
 
-    # --- Subagents (claude-sonnet-4-6) ---
-    # 5 subagents; builder agents run ~45 iterations each with ~20K input + 4K output
+    # Subagents (claude-sonnet-4-6): the builder agents run about 45
+    # iterations each at roughly 20K input and 4K output.
     subagent_iterations = 5 * 45
-    sub_in  = subagent_iterations * 20_000
+    sub_in = subagent_iterations * 20_000
     sub_out = subagent_iterations * 4_000
     sonnet = _PRICING["claude-sonnet-4-6"]
     sub_cost = sub_in * sonnet["input"] + sub_out * sonnet["output"]
 
-    # Prompt caching reduces repeated token costs by ~60%; 1.5x safety multiplier
-    cache_factor   = 0.40   # 60% savings
-    safety_factor  = 1.5
+    # Prompt caching cuts repeated token costs by roughly 60%, plus a 1.5x
+    # safety multiplier.
+    cache_factor = 0.40  # 60% savings.
+    safety_factor = 1.5
     total_cost = (orch_cost + sub_cost) * cache_factor * safety_factor
     total_tokens = orch_in + orch_out + sub_in + sub_out
 
@@ -155,9 +197,15 @@ def estimate_tokens(steps: int, avg_tokens_per_step: int = 6000) -> dict:
         "total_tokens": total_tokens,
         "cost_usd": round(total_cost, 2),
         "breakdown": {
-            "orchestrator_usd": round(orch_cost * cache_factor * safety_factor, 2),
-            "subagents_usd":    round(sub_cost  * cache_factor * safety_factor, 2),
-            "note": "estimate assumes 60% cache hit rate; actual cost varies",
+            "orchestrator_usd": round(
+                orch_cost * cache_factor * safety_factor, 2
+            ),
+            "subagents_usd": round(
+                sub_cost * cache_factor * safety_factor, 2
+            ),
+            "note": (
+                "estimate assumes 60% cache hit rate; actual cost varies"
+            ),
         },
     }
 
@@ -176,6 +224,15 @@ def estimate_tokens(steps: int, avg_tokens_per_step: int = 6000) -> dict:
 )
 @instrument(namespace="plan", tool="estimate_aws_cost")
 def estimate_aws_cost(region: str, include_rds: bool = True) -> dict:
+    """Estimates monthly AWS infrastructure cost.
+
+    Args:
+        region: The target AWS region (informational only).
+        include_rds: Whether to include the RDS line item.
+
+    Returns:
+        The base cost dict plus a total_monthly_usd entry.
+    """
     rate_limit("plan")
     costs = dict(AWS_BASE_COSTS)
     if not include_rds:
@@ -186,7 +243,9 @@ def estimate_aws_cost(region: str, include_rds: bool = True) -> dict:
 
 @registry.register(
     name="plan.render_summary",
-    description="Render the cost summary card shown to the user before build starts",
+    description=(
+        "Render the cost summary card shown to the user before build starts"
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -195,20 +254,43 @@ def estimate_aws_cost(region: str, include_rds: bool = True) -> dict:
             "steps_estimated": {"type": "integer"},
             "llm_tokens_estimated": {"type": "integer"},
         },
-        "required": ["aws_monthly_usd", "llm_cost_usd", "steps_estimated", "llm_tokens_estimated"],
+        "required": [
+            "aws_monthly_usd",
+            "llm_cost_usd",
+            "steps_estimated",
+            "llm_tokens_estimated",
+        ],
     },
 )
 @instrument(namespace="plan", tool="render_summary")
-def render_summary(aws_monthly_usd: float, llm_cost_usd: float, steps_estimated: int, llm_tokens_estimated: int) -> dict:
+def render_summary(
+    aws_monthly_usd: float,
+    llm_cost_usd: float,
+    steps_estimated: int,
+    llm_tokens_estimated: int,
+) -> dict:
+    """Renders the cost-estimate card shown before the build starts.
+
+    Args:
+        aws_monthly_usd: Estimated monthly AWS cost.
+        llm_cost_usd: Estimated LLM cost.
+        steps_estimated: Estimated number of build steps.
+        llm_tokens_estimated: Estimated total LLM token usage.
+
+    Returns:
+        A dict with the rendered "summary" string.
+    """
     rate_limit("plan")
-    W = 38  # inner content width between ║ borders
+    width = 38  # Inner content width between the ║ borders.
+
     def row(label: str, value: str) -> str:
+        """Formats one bordered row of the summary card."""
         content = f"  {label}{value}"
-        return f"║{content:<{W}}║"
+        return f"║{content:<{width}}║"
 
     summary = "\n".join([
         "╔══════════════════════════════════════╗",
-        f"║{'NEXUS BUILD ESTIMATE':^{W}}║",
+        f"║{'NEXUS BUILD ESTIMATE':^{width}}║",
         "╠══════════════════════════════════════╣",
         row("AWS cost:    $", f"{aws_monthly_usd:.2f}/month"),
         row("LLM cost:    ~$", f"{llm_cost_usd:.2f} (estimate)"),
@@ -221,7 +303,10 @@ def render_summary(aws_monthly_usd: float, llm_cost_usd: float, steps_estimated:
 
 @registry.register(
     name="plan.render_full_plan",
-    description="Render the detailed step-by-step build plan (shown only if user requests it)",
+    description=(
+        "Render the detailed step-by-step build plan (shown only if user "
+        "requests it)"
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -232,20 +317,31 @@ def render_summary(aws_monthly_usd: float, llm_cost_usd: float, steps_estimated:
 )
 @instrument(namespace="plan", tool="render_full_plan")
 def render_full_plan(steps: list[str]) -> dict:
+    """Returns the full build-plan step list with a total count.
+
+    Args:
+        steps: The ordered list of step names.
+
+    Returns:
+        A dict with the plan and its total length.
+    """
     rate_limit("plan")
     return {"plan": steps, "total": len(steps)}
 
 
 @registry.register(
     name="plan.generate_api_spec",
-    description="Generate an OpenAPI 3.0 YAML spec from AppSpec — deterministic, no LLM call",
+    description=(
+        "Generate an OpenAPI 3.0 YAML spec from AppSpec — deterministic, "
+        "no LLM call"
+    ),
     input_schema={
         "type": "object",
         "properties": {
-            "app_name":   {"type": "string"},
+            "app_name": {"type": "string"},
             "api_routes": {"type": "array", "items": {"type": "string"}},
-            "db_models":  {"type": "array", "items": {"type": "string"}},
-            "features":   {"type": "array", "items": {"type": "string"}},
+            "db_models": {"type": "array", "items": {"type": "string"}},
+            "features": {"type": "array", "items": {"type": "string"}},
             "output_dir": {"type": "string"},
         },
         "required": ["app_name", "api_routes", "db_models", "features"],
@@ -259,6 +355,22 @@ def generate_api_spec(
     features: list[str],
     output_dir: str = "/tmp",
 ) -> dict:
+    """Generates an OpenAPI 3.0 YAML spec from an AppSpec.
+
+    Infers HTTP methods per route, builds request and response schemas for
+    each model, adds an auth login path when "auth" is a feature, and
+    writes the spec to openapi.yaml under output_dir.
+
+    Args:
+        app_name: The application title for the spec.
+        api_routes: The route paths to document.
+        db_models: The model names used to build schemas.
+        features: The feature list; "auth" adds a login endpoint.
+        output_dir: Directory the openapi.yaml is written to.
+
+    Returns:
+        A dict with the rendered YAML, output path, and route count.
+    """
     import yaml as _yaml
 
     paths: dict = {}
@@ -274,13 +386,22 @@ def generate_api_spec(
         path_item: dict = {}
         for method in methods:
             tag = route.strip("/").split("/")[0] or "default"
+            operation_id = (
+                f"{method}_{route.strip('/').replace('/', '_')}"
+            )
             path_item[method] = {
                 "tags": [tag],
                 "summary": f"{method.upper()} {route}",
-                "operationId": f"{method}_{route.strip('/').replace('/', '_')}",
+                "operationId": operation_id,
                 "responses": {
-                    "200": {"description": "Successful response",
-                            "content": {"application/json": {"schema": {"type": "object"}}}},
+                    "200": {
+                        "description": "Successful response",
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object"}
+                            }
+                        },
+                    },
                     "400": {"description": "Bad request"},
                     "401": {"description": "Unauthorized"},
                 },
@@ -290,11 +411,16 @@ def generate_api_spec(
                     (m for m in db_models if m.lower() in route.lower()),
                     db_models[0] if db_models else "Item",
                 )
+                schema_ref = (
+                    f"#/components/schemas/{model_name}Request"
+                )
                 path_item[method]["requestBody"] = {
                     "required": True,
-                    "content": {"application/json": {
-                        "schema": {"$ref": f"#/components/schemas/{model_name}Request"},
-                    }},
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": schema_ref},
+                        }
+                    },
                 }
         paths[route] = path_item
 
@@ -303,12 +429,16 @@ def generate_api_spec(
         schemas[model] = {
             "type": "object",
             "properties": {
-                "id":         {"type": "integer", "example": 1},
+                "id": {"type": "integer", "example": 1},
                 "created_at": {"type": "string", "format": "date-time"},
             },
             "required": ["id"],
         }
-        schemas[f"{model}Request"] = {"type": "object", "properties": {}, "required": []}
+        schemas[f"{model}Request"] = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
 
     if "auth" in features:
         paths.setdefault("/auth/login", {})["post"] = {
@@ -317,23 +447,40 @@ def generate_api_spec(
             "operationId": "post_auth_login",
             "requestBody": {
                 "required": True,
-                "content": {"application/json": {"schema": {
-                    "type": "object",
-                    "properties": {
-                        "email":    {"type": "string", "example": "user@example.com"},
-                        "password": {"type": "string", "example": "secret"},
-                    },
-                    "required": ["email", "password"],
-                }}},
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "email": {
+                                    "type": "string",
+                                    "example": "user@example.com",
+                                },
+                                "password": {
+                                    "type": "string",
+                                    "example": "secret",
+                                },
+                            },
+                            "required": ["email", "password"],
+                        }
+                    }
+                },
             },
             "responses": {
-                "200": {"description": "JWT token", "content": {"application/json": {"schema": {
-                    "type": "object",
-                    "properties": {
-                        "access_token": {"type": "string"},
-                        "token_type":   {"type": "string"},
+                "200": {
+                    "description": "JWT token",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "access_token": {"type": "string"},
+                                    "token_type": {"type": "string"},
+                                },
+                            }
+                        }
                     },
-                }}}},
+                },
                 "401": {"description": "Invalid credentials"},
             },
         }
@@ -345,10 +492,16 @@ def generate_api_spec(
         "components": {"schemas": schemas},
     }
 
-    yaml_text = _yaml.dump(spec, default_flow_style=False, allow_unicode=True, sort_keys=True)
+    yaml_text = _yaml.dump(
+        spec, default_flow_style=False, allow_unicode=True, sort_keys=True
+    )
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "openapi.yaml")
     with open(out_path, "w") as fh:
         fh.write(yaml_text)
 
-    return {"openapi_yaml": yaml_text, "output_path": out_path, "route_count": len(paths)}
+    return {
+        "openapi_yaml": yaml_text,
+        "output_path": out_path,
+        "route_count": len(paths),
+    }

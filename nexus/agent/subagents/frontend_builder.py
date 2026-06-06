@@ -1,8 +1,13 @@
+"""The frontend builder subagent that scaffolds a React application."""
+
 from agent.subagents.base import BaseSubagent
 
 
 class FrontendBuilderSubagent(BaseSubagent):
+    """Scaffolds a complete React + TypeScript frontend from an AppSpec."""
+
     def __init__(self):
+        """Initializes the builder with its prompt, namespaces, and model."""
         super().__init__(
             name="FrontendBuilderSubagent",
             system_prompt="""You are the Nexus Frontend Builder. Given an AppSpec, API routes, and workspace path, scaffold a complete React + TypeScript application.

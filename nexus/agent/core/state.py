@@ -1,39 +1,54 @@
 from __future__ import annotations
+
+import json
 from contextvars import ContextVar
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-import json
 
 _session_id_var: ContextVar[str] = ContextVar("session_id", default="unknown")
 
+
 def set_session_id(sid: str) -> None:
+    """Sets the session id for the current context.
+
+    Args:
+        sid: The session id to store.
+    """
     _session_id_var.set(sid)
 
+
 def get_session_id() -> str:
+    """Returns the session id for the current context."""
     return _session_id_var.get()
 
 
 class AgentStatus(str, Enum):
-    PENDING        = "Pending"
-    ONGOING        = "Ongoing"
+    """Lifecycle status of a subagent."""
+
+    PENDING = "Pending"
+    ONGOING = "Ongoing"
     CODE_COMPLETED = "Code Completed"
-    TESTED         = "Tested"
+    TESTED = "Tested"
 
 
 class Phase(str, Enum):
-    PLANNING   = "PLANNING"
-    API_SPEC   = "API_SPEC"
-    BUILD      = "BUILD"
-    INFRA      = "INFRA"
-    TEST       = "TEST"
+    """A stage in the end-to-end build pipeline."""
+
+    PLANNING = "PLANNING"
+    API_SPEC = "API_SPEC"
+    BUILD = "BUILD"
+    INFRA = "INFRA"
+    TEST = "TEST"
     MONITORING = "MONITORING"
-    COMPLETE   = "COMPLETE"
+    COMPLETE = "COMPLETE"
 
 
 @dataclass
 class AppSpec:
+    """The parsed specification of the application to build."""
+
     features: list[str]
     db_models: list[str]
     api_routes: list[str]
@@ -44,6 +59,8 @@ class AppSpec:
 
 @dataclass
 class CostSummary:
+    """Estimated build cost across AWS and LLM usage."""
+
     aws_monthly_usd: float
     llm_tokens_estimated: int
     llm_cost_usd: float
@@ -52,6 +69,8 @@ class CostSummary:
 
 @dataclass
 class BackendManifest:
+    """Artifacts produced by the backend builder."""
+
     files_created: list[str]
     api_routes: list[str]
     env_vars_required: list[str]
@@ -61,6 +80,8 @@ class BackendManifest:
 
 @dataclass
 class FrontendManifest:
+    """Artifacts produced by the frontend builder."""
+
     files_created: list[str]
     dockerfile_path: str
     static_build_cmd: str
@@ -69,6 +90,8 @@ class FrontendManifest:
 
 @dataclass
 class DeploymentResult:
+    """The outcome of deploying the app to AWS."""
+
     cluster_name: str
     frontend_url: str
     backend_url: str
@@ -78,7 +101,9 @@ class DeploymentResult:
 
 @dataclass
 class TestReport:
-    __test__ = False  # prevent pytest from collecting this dataclass as a test suite
+    """Aggregated results of the integration and end-to-end test phases."""
+
+    __test__ = False  # Prevents pytest from collecting this as a test suite.
     integration_passed: int
     integration_failed: int
     e2e_passed: int
@@ -88,12 +113,18 @@ class TestReport:
 
 @dataclass
 class BuildState:
+    """The full mutable state of a single build session.
+
+    Holds the spec, per-phase manifests, deployment results, and running
+    cost totals. Serializable to and from a checkpoint file.
+    """
+
     session_id: str
     user_description: str
     current_phase: Phase = Phase.PLANNING
     app_spec: AppSpec | None = None
     cost_summary: CostSummary | None = None
-    api_spec_path: str | None = None          # path to generated openapi.yaml
+    api_spec_path: str | None = None  # Path to the generated openapi.yaml.
     backend_manifest: BackendManifest | None = None
     frontend_manifest: FrontendManifest | None = None
     deployment_result: DeploymentResult | None = None
@@ -101,10 +132,12 @@ class BuildState:
     errors: list[dict] = field(default_factory=list)
     tool_call_count: int = 0
     checkpointed_at: datetime | None = None
-    # Agent lifecycle tracking
-    agent_statuses: dict[str, str] = field(default_factory=dict)   # agent_name → AgentStatus.value
-    file_registry: list[dict] = field(default_factory=list)         # [{path, category, created_at}]
-    aws_resources: dict = field(default_factory=dict)               # resource_type → {id, arn, ...}
+    # Maps agent_name to an AgentStatus value.
+    agent_statuses: dict[str, str] = field(default_factory=dict)
+    # Entries of {path, category, created_at}.
+    file_registry: list[dict] = field(default_factory=list)
+    # Maps resource_type to {id, arn, ...}.
+    aws_resources: dict = field(default_factory=dict)
     cost_tracking: dict = field(default_factory=lambda: {
         "total_usd": 0.0,
         "input_tokens": 0,
@@ -115,12 +148,22 @@ class BuildState:
         "by_model": {},
     })
 
-    # ── status helpers ────────────────────────────────────────────────────────
-
     def set_agent_status(self, agent_name: str, status: AgentStatus) -> None:
+        """Records the lifecycle status of a subagent.
+
+        Args:
+            agent_name: The subagent's name.
+            status: Its new lifecycle status.
+        """
         self.agent_statuses[agent_name] = status.value
 
     def register_file(self, path: str, category: str) -> None:
+        """Records a generated file in the registry.
+
+        Args:
+            path: Absolute path to the file.
+            category: A label describing the file's role.
+        """
         self.file_registry.append({
             "path": path,
             "category": category,
@@ -135,22 +178,36 @@ class BuildState:
         cache_creation: int,
         model: str,
     ) -> None:
+        """Accumulates the cost of a model call into the running totals.
+
+        Args:
+            input_tokens: Number of input tokens billed.
+            output_tokens: Number of output tokens billed.
+            cache_read: Number of cache-read input tokens billed.
+            cache_creation: Number of cache-creation input tokens billed.
+            model: The model id that produced the call.
+        """
         from agent.core.cost import compute_cost
-        usd = compute_cost(input_tokens, output_tokens, cache_read, cache_creation, model)
+        usd = compute_cost(
+            input_tokens, output_tokens, cache_read, cache_creation, model
+        )
         ct = self.cost_tracking
-        ct["total_usd"]             += usd
-        ct["input_tokens"]          += input_tokens
-        ct["output_tokens"]         += output_tokens
-        ct["cache_read_tokens"]     += cache_read
+        ct["total_usd"] += usd
+        ct["input_tokens"] += input_tokens
+        ct["output_tokens"] += output_tokens
+        ct["cache_read_tokens"] += cache_read
         ct["cache_creation_tokens"] += cache_creation
-        ct["calls"]                 += 1
+        ct["calls"] += 1
         ct["by_model"].setdefault(model, {"usd": 0.0, "calls": 0})
-        ct["by_model"][model]["usd"]   += usd
+        ct["by_model"][model]["usd"] += usd
         ct["by_model"][model]["calls"] += 1
 
-    # ── persistence ───────────────────────────────────────────────────────────
-
     def checkpoint(self, path: Path) -> None:
+        """Serializes the state to a JSON checkpoint file.
+
+        Args:
+            path: Destination file path.
+        """
         self.checkpointed_at = datetime.now(timezone.utc)
         data = asdict(self)
         data["current_phase"] = self.current_phase.value
@@ -159,29 +216,49 @@ class BuildState:
 
     @classmethod
     def from_checkpoint(cls, path: Path) -> BuildState:
+        """Loads build state from a JSON checkpoint file.
+
+        Migrates legacy phase names and backfills fields that did not
+        exist when the checkpoint was written.
+
+        Args:
+            path: The checkpoint file to load.
+
+        Returns:
+            The reconstructed build state.
+        """
         data = json.loads(path.read_text())
         raw_phase = data["current_phase"]
-        # Migrate old phase names that no longer exist in the new sequence
+        # Migrate old phase names that no longer exist in the new sequence.
         _phase_migration = {"BACKEND": "BUILD", "FRONTEND": "BUILD"}
         raw_phase = _phase_migration.get(raw_phase, raw_phase)
         data["current_phase"] = Phase(raw_phase)
         if data.get("checkpointed_at"):
-            data["checkpointed_at"] = datetime.fromisoformat(data["checkpointed_at"])
+            data["checkpointed_at"] = datetime.fromisoformat(
+                data["checkpointed_at"]
+            )
         for key, klass in [
-            ("app_spec", AppSpec), ("cost_summary", CostSummary),
-            ("backend_manifest", BackendManifest), ("frontend_manifest", FrontendManifest),
-            ("deployment_result", DeploymentResult), ("test_report", TestReport),
+            ("app_spec", AppSpec),
+            ("cost_summary", CostSummary),
+            ("backend_manifest", BackendManifest),
+            ("frontend_manifest", FrontendManifest),
+            ("deployment_result", DeploymentResult),
+            ("test_report", TestReport),
         ]:
             if data.get(key):
                 data[key] = klass(**data[key])
-        # Ensure new fields exist when loading old checkpoints
+        # Ensure new fields exist when loading old checkpoints.
         data.setdefault("agent_statuses", {})
         data.setdefault("file_registry", [])
         data.setdefault("api_spec_path", None)
         data.setdefault("aws_resources", {})
         data.setdefault("cost_tracking", {
-            "total_usd": 0.0, "input_tokens": 0, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_creation_tokens": 0,
-            "calls": 0, "by_model": {},
+            "total_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "calls": 0,
+            "by_model": {},
         })
         return cls(**data)

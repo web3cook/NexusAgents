@@ -1,8 +1,13 @@
+"""The backend builder subagent that scaffolds a FastAPI application."""
+
 from agent.subagents.base import BaseSubagent
 
 
 class BackendBuilderSubagent(BaseSubagent):
+    """Scaffolds a complete FastAPI backend from an AppSpec."""
+
     def __init__(self):
+        """Initializes the builder with its prompt, namespaces, and model."""
         super().__init__(
             name="BackendBuilderSubagent",
             system_prompt="""You are the Nexus Backend Builder. Given an AppSpec and workspace path, scaffold a complete FastAPI application.

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import logging
 import subprocess
@@ -16,6 +17,15 @@ _TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
 
 
 def _render(template_path: Path, **ctx) -> str:
+    """Renders a Jinja2 template with strict undefined handling.
+
+    Args:
+        template_path: Path to the template file.
+        **ctx: Variables passed to the template.
+
+    Returns:
+        The rendered template text.
+    """
     from jinja2 import Environment, FileSystemLoader, StrictUndefined
     env = Environment(
         loader=FileSystemLoader(str(template_path.parent)),
@@ -26,25 +36,34 @@ def _render(template_path: Path, **ctx) -> str:
 
 
 def pre_render_build_templates(app_spec: AppSpec, workspace: str) -> list[str]:
-    """Render Dockerfile and K8s manifests from existing Jinja2 templates.
+    """Renders Dockerfiles and K8s manifests from existing templates.
 
-    No LLM call. Returns absolute paths of files written.
+    Performs no LLM call. Existing Dockerfiles and compose files are left
+    untouched so a subagent's own output is not overwritten.
+
+    Args:
+        app_spec: The application spec (currently unused by the templates
+            but kept for signature stability).
+        workspace: The root workspace directory to write into.
+
+    Returns:
+        Absolute paths of the files that were written.
     """
     ws = Path(workspace)
     written: list[str] = []
 
-    # ── Backend Dockerfile (no template variables) ───────────────────────────
+    # Backend Dockerfile (no template variables).
     tmpl = _TEMPLATES_DIR / "fastapi" / "Dockerfile.j2"
     if tmpl.exists():
         backend_dir = ws / "backend"
         backend_dir.mkdir(parents=True, exist_ok=True)
         out = backend_dir / "Dockerfile"
-        if not out.exists():  # don't overwrite if subagent already wrote one
+        if not out.exists():  # Do not overwrite a subagent-written file.
             out.write_text(tmpl.read_text())
             written.append(str(out))
             logger.debug("rendered %s", out)
 
-    # ── Frontend Dockerfile (no template variables) ──────────────────────────
+    # Frontend Dockerfile (no template variables).
     tmpl = _TEMPLATES_DIR / "react" / "Dockerfile.j2"
     if tmpl.exists():
         frontend_dir = ws / "frontend"
@@ -55,24 +74,24 @@ def pre_render_build_templates(app_spec: AppSpec, workspace: str) -> list[str]:
             written.append(str(out))
             logger.debug("rendered %s", out)
 
-    # ── K8s manifests ────────────────────────────────────────────────────────
+    # K8s manifests.
     k8s_dir = ws / "k8s"
     k8s_dir.mkdir(parents=True, exist_ok=True)
 
     depl_tmpl = _TEMPLATES_DIR / "k8s" / "deployment.yaml.j2"
-    svc_tmpl  = _TEMPLATES_DIR / "k8s" / "service.yaml.j2"
+    svc_tmpl = _TEMPLATES_DIR / "k8s" / "service.yaml.j2"
     namespace = "nexus"
 
     _backend_env_vars = [
         {"name": "DATABASE_URL", "key": "database-url"},
-        {"name": "JWT_SECRET",   "key": "jwt-secret"},
-        {"name": "AWS_REGION",   "key": "aws-region"},
+        {"name": "JWT_SECRET", "key": "jwt-secret"},
+        {"name": "AWS_REGION", "key": "aws-region"},
     ]
     _frontend_env_vars: list = []
 
     for role, port, env_vars, health in [
-        ("backend",  8000, _backend_env_vars, "/health"),
-        ("frontend", 80,   _frontend_env_vars, "/"),
+        ("backend", 8000, _backend_env_vars, "/health"),
+        ("frontend", 80, _frontend_env_vars, "/"),
     ]:
         if depl_tmpl.exists():
             out = k8s_dir / f"{role}-deployment.yaml"
@@ -89,7 +108,9 @@ def pre_render_build_templates(app_spec: AppSpec, workspace: str) -> list[str]:
 
         if svc_tmpl.exists():
             out = k8s_dir / f"{role}-service.yaml"
-            out.write_text(_render(svc_tmpl, name=f"nexus-{role}", namespace=namespace, port=port))
+            out.write_text(_render(
+                svc_tmpl, name=f"nexus-{role}", namespace=namespace, port=port
+            ))
             written.append(str(out))
 
     ingress_tmpl = _TEMPLATES_DIR / "k8s" / "ingress.yaml.j2"
@@ -98,7 +119,7 @@ def pre_render_build_templates(app_spec: AppSpec, workspace: str) -> list[str]:
         out.write_text(_render(ingress_tmpl, namespace=namespace))
         written.append(str(out))
 
-    # ── docker-compose.yml for local testing ─────────────────────────────────
+    # docker-compose.yml for local testing.
     compose_tmpl = _TEMPLATES_DIR / "docker-compose.yml.j2"
     if compose_tmpl.exists():
         out = ws / "docker-compose.yml"
@@ -112,20 +133,37 @@ def pre_render_build_templates(app_spec: AppSpec, workspace: str) -> list[str]:
             written.append(str(out))
             logger.debug("rendered %s", out)
 
-    logger.info("pre_render_build_templates: %d files written to %s", len(written), workspace)
+    logger.info(
+        "pre_render_build_templates: %d files written to %s",
+        len(written), workspace,
+    )
     return written
 
 
-# ── Parallel subprocess workers ───────────────────────────────────────────────
+def _run_agent_subprocess(
+    agent_class_path: str,
+    app_spec_dict: dict,
+    workspace: str,
+) -> dict:
+    """Runs a subagent in a child Python process and returns its result.
 
-def _run_agent_subprocess(agent_class_path: str, app_spec_dict: dict, workspace: str) -> dict:
-    """Spawn a child Python process to run a subagent and return its result dict."""
+    Args:
+        agent_class_path: Dotted import path to the subagent class.
+        app_spec_dict: The app spec serialized as a dict.
+        workspace: The root workspace directory.
+
+    Returns:
+        The subagent's result dict, or an error dict if the child process
+        exits without emitting a result.
+    """
     root = str(Path(__file__).parent.parent.parent)
+    module, class_name = agent_class_path.rsplit(".", 1)
     script = (
         f"import json, sys; sys.path.insert(0, {root!r})\n"
-        f"from {agent_class_path.rsplit('.', 1)[0]} import {agent_class_path.rsplit('.', 1)[1]}\n"
-        f"subagent = {agent_class_path.rsplit('.', 1)[1]}()\n"
-        f"result = subagent.run({{'app_spec': {json.dumps(app_spec_dict)!r}, 'workspace': {workspace!r}}})\n"
+        f"from {module} import {class_name}\n"
+        f"subagent = {class_name}()\n"
+        f"result = subagent.run({{'app_spec': {json.dumps(app_spec_dict)!r}, "
+        f"'workspace': {workspace!r}}})\n"
         f"print('__RESULT__' + json.dumps(result))\n"
     )
     proc = subprocess.run(
@@ -136,10 +174,21 @@ def _run_agent_subprocess(agent_class_path: str, app_spec_dict: dict, workspace:
     for line in proc.stdout.splitlines():
         if line.startswith("__RESULT__"):
             return json.loads(line[len("__RESULT__"):])
-    return {"error": f"subprocess exited {proc.returncode}: {proc.stderr[-500:]}"}
+    return {
+        "error": f"subprocess exited {proc.returncode}: {proc.stderr[-500:]}"
+    }
 
 
 def _run_backend_subprocess(app_spec_dict: dict, workspace: str) -> dict:
+    """Runs the backend builder subagent in a child process.
+
+    Args:
+        app_spec_dict: The app spec serialized as a dict.
+        workspace: The root workspace directory.
+
+    Returns:
+        The backend builder's result dict.
+    """
     return _run_agent_subprocess(
         "agent.subagents.backend_builder.BackendBuilderSubagent",
         app_spec_dict, workspace,
@@ -147,6 +196,15 @@ def _run_backend_subprocess(app_spec_dict: dict, workspace: str) -> dict:
 
 
 def _run_frontend_subprocess(app_spec_dict: dict, workspace: str) -> dict:
+    """Runs the frontend builder subagent in a child process.
+
+    Args:
+        app_spec_dict: The app spec serialized as a dict.
+        workspace: The root workspace directory.
+
+    Returns:
+        The frontend builder's result dict.
+    """
     return _run_agent_subprocess(
         "agent.subagents.frontend_builder.FrontendBuilderSubagent",
         app_spec_dict, workspace,
@@ -158,9 +216,17 @@ def run_build_parallel(
     workspace: str,
     state: BuildState,
 ) -> tuple[dict, dict]:
-    """Run backend + frontend subagents in parallel subprocesses.
+    """Runs the backend and frontend builders in parallel subprocesses.
 
-    Returns (backend_result, frontend_result) and updates state.agent_statuses.
+    Updates state.agent_statuses as each subprocess starts and finishes.
+
+    Args:
+        app_spec: The application spec to build from.
+        workspace: The root workspace directory.
+        state: The build state to update with agent statuses.
+
+    Returns:
+        A (backend_result, frontend_result) tuple.
     """
     from dataclasses import asdict
     from agent.core.state import AgentStatus
@@ -171,21 +237,33 @@ def run_build_parallel(
     logger.info("  Launching backend + frontend subprocesses in parallel...")
 
     with ProcessPoolExecutor(max_workers=2) as pool:
-        fut_backend  = pool.submit(_run_backend_subprocess,  spec_dict, workspace)
-        fut_frontend = pool.submit(_run_frontend_subprocess, spec_dict, workspace)
-        backend_result  = fut_backend.result(timeout=960)
+        fut_backend = pool.submit(_run_backend_subprocess, spec_dict, workspace)
+        fut_frontend = pool.submit(
+            _run_frontend_subprocess, spec_dict, workspace
+        )
+        backend_result = fut_backend.result(timeout=960)
         frontend_result = fut_frontend.result(timeout=960)
 
     if "error" not in backend_result:
-        state.set_agent_status("BackendBuilderSubagent", AgentStatus.CODE_COMPLETED)
+        state.set_agent_status(
+            "BackendBuilderSubagent", AgentStatus.CODE_COMPLETED
+        )
         logger.info("  [green]backend[/green] subprocess complete")
     else:
-        logger.warning("  [red]backend[/red] subprocess error: %s", backend_result.get("error"))
+        logger.warning(
+            "  [red]backend[/red] subprocess error: %s",
+            backend_result.get("error"),
+        )
 
     if "error" not in frontend_result:
-        state.set_agent_status("FrontendBuilderSubagent", AgentStatus.CODE_COMPLETED)
+        state.set_agent_status(
+            "FrontendBuilderSubagent", AgentStatus.CODE_COMPLETED
+        )
         logger.info("  [green]frontend[/green] subprocess complete")
     else:
-        logger.warning("  [red]frontend[/red] subprocess error: %s", frontend_result.get("error"))
+        logger.warning(
+            "  [red]frontend[/red] subprocess error: %s",
+            frontend_result.get("error"),
+        )
 
     return backend_result, frontend_result
