@@ -98,7 +98,21 @@ def pre_render_build_templates(app_spec: AppSpec, workspace: str) -> list[str]:
         out.write_text(_render(ingress_tmpl, namespace=namespace))
         written.append(str(out))
 
-    logger.info("pre_render_build_templates: %d files written to %s/k8s/", len(written), workspace)
+    # ── docker-compose.yml for local testing ─────────────────────────────────
+    compose_tmpl = _TEMPLATES_DIR / "docker-compose.yml.j2"
+    if compose_tmpl.exists():
+        out = ws / "docker-compose.yml"
+        if not out.exists():
+            out.write_text(_render(
+                compose_tmpl,
+                db_name="nexusdb",
+                db_user="nexus",
+                db_password="nexuspassword",
+            ))
+            written.append(str(out))
+            logger.debug("rendered %s", out)
+
+    logger.info("pre_render_build_templates: %d files written to %s", len(written), workspace)
     return written
 
 

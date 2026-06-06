@@ -148,6 +148,38 @@ Each session gets its own directory under `--workflow-dir`:
     └── k8s/                   ← rendered Kubernetes manifests
 ```
 
+### Local testing with docker-compose
+
+Nexus generates a `docker-compose.yml` during the BUILD phase (before any AWS calls). Use it to smoke-test the full stack locally before deploying to EKS:
+
+```bash
+# After nexus build completes or is interrupted mid-INFRA:
+cd /tmp/nexus-workflow/<session-id>/
+
+# Build and start all three services
+docker compose up --build
+
+# Services:
+#   frontend  → http://localhost:3000
+#   backend   → http://localhost:8000
+#   db        → localhost:5432  (user: nexus  pass: nexuspassword  db: nexusdb)
+
+# Health check
+curl http://localhost:8000/health
+
+# Tear down
+docker compose down -v    # -v removes the postgres volume too
+```
+
+The compose file wires:
+- `db` (postgres:15-alpine) with a healthcheck — backend waits for it
+- `backend` (FastAPI) depends on `db:service_healthy`, exposes port 8000
+- `frontend` (Nginx serving built React) depends on `backend:service_healthy`, exposes port 3000
+
+The React app's API base URL defaults to `http://localhost:8000`, so no extra config is needed for local testing.
+
+---
+
 ### `nexus eval-cmd` — run the eval harness in mock mode
 
 ```bash
