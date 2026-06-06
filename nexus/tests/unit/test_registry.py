@@ -25,7 +25,8 @@ def test_get_anthropic_tools_filters_by_namespace():
 
     plan_tools = reg.get_anthropic_tools(namespaces=["plan"])
     assert len(plan_tools) == 1
-    assert plan_tools[0]["name"] == "plan.foo"
+    # API names use __ instead of . (Anthropic rejects dots in tool names)
+    assert plan_tools[0]["name"] == "plan__foo"
 
 def test_get_anthropic_tools_all():
     reg = ToolRegistry()
@@ -59,6 +60,16 @@ def test_get_namespaces_sorted():
     def two(): pass
 
     assert reg.get_namespaces() == ["a", "z"]
+
+def test_call_via_api_name():
+    reg = ToolRegistry()
+
+    @reg.register(name="plan.foo", description="foo", input_schema={"type": "object", "properties": {}})
+    def foo(): return "foo"
+
+    # Both dotted and double-underscore forms should work
+    assert reg.call("plan.foo") == "foo"
+    assert reg.call("plan__foo") == "foo"
 
 def test_len():
     reg = ToolRegistry()

@@ -100,25 +100,27 @@ def run(user_description: str, workspace: str, checkpoint_dir: Path | None = Non
 
 
 def _update_state(state: BuildState, tool_name: str, result: dict) -> None:
-    if tool_name == "subagent.run_planner" and "app_spec" in result:
+    # Normalize API form ('namespace__tool') to registry form ('namespace.tool')
+    name = registry._registry_name(tool_name) if "__" in tool_name else tool_name
+    if name == "subagent.run_planner" and "app_spec" in result:
         spec = result["app_spec"]
         state.app_spec = AppSpec(**spec) if isinstance(spec, dict) else spec
         if "cost_summary" in result:
             cs = result["cost_summary"]
             state.cost_summary = CostSummary(**cs) if isinstance(cs, dict) else cs
-    elif tool_name == "subagent.run_backend_builder" and "files_created" in result:
+    elif name == "subagent.run_backend_builder" and "files_created" in result:
         state.backend_manifest = BackendManifest(**result)
-    elif tool_name == "subagent.run_frontend_builder" and "files_created" in result:
+    elif name == "subagent.run_frontend_builder" and "files_created" in result:
         state.frontend_manifest = FrontendManifest(**result)
-    elif tool_name == "subagent.run_infra_provisioner" and "cluster_name" in result:
+    elif name == "subagent.run_infra_provisioner" and "cluster_name" in result:
         state.deployment_result = DeploymentResult(**result)
-    elif tool_name in ("test.run_integration_tests", "test.run_e2e_tests"):
+    elif name in ("test.run_integration_tests", "test.run_e2e_tests"):
         if state.test_report is None:
             state.test_report = TestReport(
                 integration_passed=0, integration_failed=0,
                 e2e_passed=0, e2e_failed=0, coverage_pct=0.0,
             )
-        if tool_name == "test.run_integration_tests":
+        if name == "test.run_integration_tests":
             state.test_report.integration_passed = result.get("passed", 0)
             state.test_report.integration_failed = result.get("failed", 0)
         else:

@@ -29,9 +29,21 @@ class ToolRegistry:
         return decorator
 
     def call(self, name: str, **kwargs: Any) -> Any:
-        if name not in self._tools:
+        # Accept both 'namespace.tool' and 'namespace__tool' (API form)
+        registry_name = self._registry_name(name) if "__" in name else name
+        if registry_name not in self._tools:
             raise ValueError(f"Unknown tool: {name}")
-        return self._tools[name].fn(**kwargs)
+        return self._tools[registry_name].fn(**kwargs)
+
+    @staticmethod
+    def _api_name(name: str) -> str:
+        """Convert 'namespace.tool' → 'namespace__tool' for Anthropic API compatibility."""
+        return name.replace(".", "__", 1)
+
+    @staticmethod
+    def _registry_name(api_name: str) -> str:
+        """Convert 'namespace__tool' → 'namespace.tool' for registry lookup."""
+        return api_name.replace("__", ".", 1)
 
     def get_anthropic_tools(self, namespaces: list[str] | None = None) -> list[dict]:
         result = []
@@ -39,7 +51,7 @@ class ToolRegistry:
             ns = name.split(".")[0]
             if namespaces is None or ns in namespaces:
                 result.append({
-                    "name": name,
+                    "name": self._api_name(name),
                     "description": defn.description,
                     "input_schema": defn.input_schema,
                 })
