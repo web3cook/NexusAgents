@@ -4,6 +4,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from agent.core.observability import setup_logging
 
 app = typer.Typer(name="nexus", help="Autonomous full-stack app builder and deployer")
 console = Console()
@@ -13,13 +14,14 @@ console = Console()
 def build(
     description: str = typer.Argument(..., help="Natural language description of the app to build"),
     workspace: str = typer.Option("/tmp/nexus-workspace", help="Local workspace directory"),
-    region: str = typer.Option("us-east-1", help="AWS region"),
+    region: str = typer.Option("us-east-2", help="AWS region"),
     telegram_token: str = typer.Option("", envvar="TELEGRAM_BOT_TOKEN", help="Telegram bot token for alerts"),
     telegram_chat: str = typer.Option("", envvar="TELEGRAM_CHAT_ID", help="Telegram chat ID"),
     dry_run: bool = typer.Option(False, help="Show cost estimate only, do not build"),
     resume: bool = typer.Option(False, help="Resume from last checkpoint"),
 ):
     """Build and deploy a full-stack application from a description."""
+    setup_logging()
     console.print(Panel.fit("[bold blue]NEXUS[/bold blue] — Autonomous App Builder", subtitle="Starting build..."))
     console.print(f"[dim]Description:[/dim] {description}")
     console.print(f"[dim]Workspace:[/dim] {workspace}")
@@ -71,6 +73,7 @@ def eval_cmd(
     mock: bool = typer.Option(True, help="Use mock AWS (moto) — no real AWS calls"),
 ):
     """Run the evaluation harness against a known spec."""
+    setup_logging()
     from eval.harness import run_eval
     from eval.cases.basic_saas import EVAL_CASE
     from agent.core.state import BuildState, CostSummary, AppSpec

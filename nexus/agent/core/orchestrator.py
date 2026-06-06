@@ -1,4 +1,6 @@
 from __future__ import annotations
+import logging
+import time
 import uuid
 from pathlib import Path
 import anthropic
@@ -10,6 +12,7 @@ from agent.core.state import (
 )
 from agent.core.context import compress_phase, summarise_messages
 
+logger = logging.getLogger("nexus.orchestrator")
 client = anthropic.Anthropic()
 
 SYSTEM_PROMPT = """You are Nexus, an autonomous full-stack application builder and deployer.
@@ -46,14 +49,36 @@ def run(user_description: str, workspace: str, checkpoint_dir: Path | None = Non
     state = BuildState(session_id=session_id, user_description=user_description)
     checkpoint_path = checkpoint_dir / f"{session_id}.json"
 
-    if checkpoint_path.exists():
+    resumed = checkpoint_path.exists()
+    if resumed:
         state = BuildState.from_checkpoint(checkpoint_path)
+
+    build_start = time.monotonic()
+    logger.info(
+        "[bold]session %s[/bold] — %s%s",
+        session_id,
+        user_description[:100],
+        "  [yellow](resuming)[/yellow]" if resumed else "",
+    )
+    logger.info("workspace: %s", workspace)
 
     messages: list[dict] = [
         {"role": "user", "content": f"Build this app: {user_description}\nWorkspace: {workspace}"}
     ]
 
+    current_phase_logged: Phase | None = None
+
     while state.current_phase != Phase.COMPLETE:
+        if state.current_phase != current_phase_logged:
+            phases = list(Phase)
+            total = len(phases) - 1  # exclude COMPLETE
+            idx = phases.index(state.current_phase) + 1
+            logger.info(
+                "[cyan]──── phase %d/%d: %s ────[/cyan]",
+                idx, total, state.current_phase.name,
+            )
+            current_phase_logged = state.current_phase
+
         namespaces = PHASE_TOOLS.get(state.current_phase)
         tools = registry.get_anthropic_tools(namespaces=namespaces) if namespaces else registry.get_anthropic_tools()
 
@@ -71,10 +96,18 @@ def run(user_description: str, workspace: str, checkpoint_dir: Path | None = Non
         for block in response.content:
             if block.type == "tool_use":
                 state.tool_call_count += 1
+                display_name = registry._registry_name(block.name) if "__" in block.name else block.name
+                t0 = time.monotonic()
+                logger.info("  [dim]#%d[/dim] → %s", state.tool_call_count, display_name)
                 try:
                     result = registry.call(block.name, **block.input)
                     _update_state(state, block.name, result)
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    status_str = _result_summary(result)
+                    logger.info("       [green]ok[/green] %s  [dim]%dms[/dim]", status_str, elapsed_ms)
                 except Exception as exc:
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    logger.warning("       [red]err[/red] %s  [dim]%dms[/dim]", exc, elapsed_ms)
                     result = {"error": str(exc)}
                 tool_results.append({
                     "type": "tool_result",
@@ -88,15 +121,35 @@ def run(user_description: str, workspace: str, checkpoint_dir: Path | None = Non
 
         new_phase = _infer_next_phase(state)
         if new_phase != state.current_phase:
+            logger.info(
+                "[green]✓[/green] %s complete → entering %s",
+                state.current_phase.name, new_phase.name,
+            )
             summary = compress_phase(state, state.current_phase)
             messages.append({"role": "user", "content": summary})
             state.current_phase = new_phase
             state.checkpoint(checkpoint_path)
+            logger.info("  checkpoint saved: %s", checkpoint_path)
 
         if response.stop_reason == "end_turn" and not tool_results:
             state.current_phase = Phase.COMPLETE
 
+    elapsed = time.monotonic() - build_start
+    logger.info(
+        "[bold green]BUILD COMPLETE[/bold green] — %d tool calls in %.1fs",
+        state.tool_call_count, elapsed,
+    )
     return state
+
+
+def _result_summary(result: object) -> str:
+    """One-line summary of a tool result for logging."""
+    if not isinstance(result, dict):
+        return ""
+    if "error" in result:
+        return f"error={result['error']!r}"
+    keys = [k for k in result if k not in ("status",)]
+    return " ".join(f"{k}={str(result[k])[:40]!r}" for k in keys[:3])
 
 
 def _update_state(state: BuildState, tool_name: str, result: dict) -> None:

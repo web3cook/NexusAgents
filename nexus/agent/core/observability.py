@@ -12,6 +12,27 @@ logger = logging.getLogger("nexus")
 logger.addHandler(logging.NullHandler())  # library best-practice: let the app configure handlers
 
 
+def setup_logging(level: int = logging.INFO) -> None:
+    """Attach a stderr handler to the nexus logger. Safe to call multiple times."""
+    if logger.handlers and not isinstance(logger.handlers[0], logging.NullHandler):
+        return
+    logger.handlers.clear()
+    try:
+        from rich.logging import RichHandler
+        handler: logging.Handler = RichHandler(
+            show_path=False,
+            markup=True,
+            rich_tracebacks=True,
+        )
+        handler.setFormatter(logging.Formatter("%(message)s", datefmt="[%X]"))
+    except ImportError:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s — %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False
+
+
 def instrument(namespace: str, tool: str) -> Callable:
     def decorator(fn: Callable) -> Callable:
         if asyncio.iscoroutinefunction(fn):
