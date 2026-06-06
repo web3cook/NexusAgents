@@ -3,6 +3,7 @@ import logging
 import sys
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -35,7 +36,9 @@ def build(
     telegram_token: str = typer.Option("", envvar="TELEGRAM_BOT_TOKEN", help="Telegram bot token for alerts"),
     telegram_chat: str = typer.Option("", envvar="TELEGRAM_CHAT_ID", help="Telegram chat ID"),
     dry_run: bool = typer.Option(False, help="Show cost estimate only, do not build"),
-    resume: bool = typer.Option(False, help="Resume from last checkpoint"),
+    resume: Optional[str] = typer.Option(None, "--resume", metavar="SESSION_ID",
+                                         help="Resume a build. Omit SESSION_ID to resume the last session, "
+                                              "or pass a session ID (e.g. --resume f33bd627) to resume a specific one."),
     log_level: LogLevel = typer.Option(LogLevel.normal, "--log-level", help="verbose=all detail, normal=progress, bugs=warnings/errors, silent=quiet"),
 ):
     """Build and deploy a full-stack application from a description."""
@@ -68,8 +71,12 @@ def build(
         return
 
     from agent.core.orchestrator import run
+    # resume="" means --resume was passed without a value → resume last session
+    want_resume = resume is not None
+    explicit_id = resume if resume else None
     try:
-        state = run(user_description=description, workspace=workspace, resume=resume)
+        state = run(user_description=description, workspace=workspace,
+                    resume=want_resume, session_id=explicit_id)
         if state.deployment_result:
             console.print("\n[bold green]✓ Build complete![/bold green]")
             console.print(f"Frontend: [link]{state.deployment_result.frontend_url}[/link]")

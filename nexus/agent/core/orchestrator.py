@@ -51,24 +51,32 @@ def run(
     workspace: str,
     checkpoint_dir: Path | None = None,
     resume: bool = False,
+    session_id: str | None = None,
 ) -> BuildState:
     checkpoint_dir = checkpoint_dir or Path("/tmp/nexus-checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     resumed = False
-    if resume:
-        latest = _latest_checkpoint(checkpoint_dir)
-        if latest:
-            state = BuildState.from_checkpoint(latest)
+    if resume or session_id:
+        if session_id:
+            checkpoint_path = checkpoint_dir / f"{session_id}.json"
+            if not checkpoint_path.exists():
+                logger.error("No checkpoint found for session %s in %s", session_id, checkpoint_dir)
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        else:
+            checkpoint_path = _latest_checkpoint(checkpoint_dir)
+            if not checkpoint_path:
+                logger.warning("--resume requested but no checkpoint found in %s — starting fresh", checkpoint_dir)
+                checkpoint_path = None
+
+        if checkpoint_path:
+            state = BuildState.from_checkpoint(checkpoint_path)
             set_session_id(state.session_id)
-            checkpoint_path = latest
             resumed = True
             logger.info(
                 "[yellow]Resuming session %s from phase %s[/yellow]  [dim](%s)[/dim]",
-                state.session_id, state.current_phase.name, latest.name,
+                state.session_id, state.current_phase.name, checkpoint_path.name,
             )
-        else:
-            logger.warning("--resume requested but no checkpoint found in %s — starting fresh", checkpoint_dir)
 
     if not resumed:
         session_id = str(uuid.uuid4())[:8]
