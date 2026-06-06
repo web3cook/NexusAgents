@@ -388,9 +388,11 @@ def run(
                     else:
                         phase_error_counts.pop(state.current_phase, None)
                 except Exception as exc:
+                    import traceback
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     logger.warning("       [red]err[/red] %s  [dim]%dms[/dim]", exc, elapsed_ms)
-                    result = {"error": str(exc)}
+                    logger.debug("       traceback:\n%s", traceback.format_exc())
+                    result = {"error": str(exc), "traceback": traceback.format_exc()}
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

@@ -360,32 +360,61 @@ def run_migration_job(workspace: str, namespace: str, image: str) -> dict:
     if apply.returncode != 0:
         raise NexusError(f"migration job apply failed: {apply.stderr[:200]}", retryable=True)
 
-    # Poll for Complete or Failed (up to 5 min) — kubectl wait only supports one
-    # condition at a time, so polling lets us detect failure early instead of
-    # waiting the full timeout when alembic exits non-zero.
+    # Poll for Complete or Failed (up to 5 min).
+    # Also detect pods stuck in Pending (no nodes) — fail fast instead of burning 5 min.
     deadline = time.monotonic() + 300
+    pending_since: float | None = None
+
     while time.monotonic() < deadline:
-        status = _kube(
-            "get", "job", JOB_NAME, "-n", namespace,
-            "-o", r"jsonpath={.status.conditions}",
-            timeout=15,
-        )
-        if status.returncode == 0 and status.stdout.strip():
+        # ── Check job terminal conditions via full JSON ───────────────────────
+        job_r = _kube("get", "job", JOB_NAME, "-n", namespace, "-o", "json", timeout=15)
+        if job_r.returncode == 0 and job_r.stdout.strip():
             try:
-                for cond in json.loads(status.stdout):
-                    if cond.get("type") == "Complete" and cond.get("status") == "True":
-                        return {"completed": True, "namespace": namespace}
+                js = json.loads(job_r.stdout).get("status", {})
+                if js.get("completionTime"):
+                    return {"completed": True, "namespace": namespace}
+                for cond in js.get("conditions", []):
                     if cond.get("type") == "Failed" and cond.get("status") == "True":
-                        logs = _kube(
-                            "logs", "-n", namespace, f"-l job-name={JOB_NAME}", "--tail=50",
-                            timeout=20,
-                        )
+                        logs = _kube("logs", "-n", namespace,
+                                     f"-l job-name={JOB_NAME}", "--tail=50", timeout=20)
                         raise NexusError(
-                            f"migration job failed — alembic logs: {logs.stdout[-400:] or logs.stderr[-200:]}",
+                            f"migration job failed — logs: {logs.stdout[-400:] or logs.stderr[-200:]}",
                             retryable=False,
                         )
             except (json.JSONDecodeError, KeyError):
                 pass
+
+        # ── Detect pods stuck in Pending (cluster has no schedulable nodes) ──
+        pods_r = _kube("get", "pods", "-n", namespace,
+                       "-l", f"job-name={JOB_NAME}",
+                       "-o", "jsonpath={.items[*].status.phase}", timeout=15)
+        phases = pods_r.stdout.strip().split() if pods_r.returncode == 0 else []
+        all_pending = phases and all(p == "Pending" for p in phases)
+
+        if all_pending:
+            if pending_since is None:
+                pending_since = time.monotonic()
+            elif time.monotonic() - pending_since > 90:
+                # Describe the stuck pod to surface the scheduler event
+                pod_name_r = _kube("get", "pods", "-n", namespace,
+                                   "-l", f"job-name={JOB_NAME}",
+                                   "-o", "jsonpath={.items[0].metadata.name}", timeout=15)
+                events = ""
+                if pod_name_r.returncode == 0 and pod_name_r.stdout.strip():
+                    desc = _kube("describe", "pod", pod_name_r.stdout.strip(),
+                                 "-n", namespace, timeout=15)
+                    # Pull just the Events section for a concise message
+                    for line in desc.stdout.splitlines():
+                        if "FailedScheduling" in line or "no nodes" in line.lower():
+                            events += line.strip() + " "
+                raise NexusError(
+                    f"migration pod stuck in Pending for 90s — cluster likely has no schedulable nodes. "
+                    f"Call aws.create_eks_cluster again to provision a node group. Events: {events[:300]}",
+                    retryable=False,
+                )
+        else:
+            pending_since = None
+
         time.sleep(5)
 
     raise NexusError("migration job timed out after 300s", retryable=True)
@@ -413,3 +442,37 @@ def get_resource_usage(namespace: str) -> dict:
         if len(parts) >= 3:
             pods.append({"name": parts[0], "cpu": parts[1], "memory": parts[2]})
     return {"namespace": namespace, "pods": pods}
+
+
+@registry.register(
+    name="k8s.wait_for_nodes",
+    description="Wait until the cluster has at least one Ready node before scheduling workloads",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "min_nodes": {"type": "integer"},
+            "timeout_seconds": {"type": "integer"},
+        },
+        "required": [],
+    },
+)
+@instrument(namespace="k8s", tool="wait_for_nodes")
+@retry(max_attempts=3, base_delay_seconds=15.0, retryable_on=[NexusError])
+def wait_for_nodes(min_nodes: int = 1, timeout_seconds: int = 600) -> dict:
+    rate_limit("k8s")
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = _kube("get", "nodes", "--no-headers", timeout=15)
+        if result.returncode == 0:
+            ready_nodes = [
+                line for line in result.stdout.strip().splitlines()
+                if "Ready" in line and "NotReady" not in line
+            ]
+            if len(ready_nodes) >= min_nodes:
+                return {"ready_nodes": len(ready_nodes), "nodes_ready": True}
+        time.sleep(15)
+    raise NexusError(
+        f"Cluster still has no Ready nodes after {timeout_seconds}s. "
+        "Ensure the node group was created: call aws.create_eks_cluster to provision one.",
+        retryable=True,
+    )

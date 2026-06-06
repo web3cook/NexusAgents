@@ -57,38 +57,69 @@ def create_ecr_repo(repo_name: str, region: str) -> dict:
 def create_eks_cluster(cluster_name: str, region: str, node_type: str = "t3.medium", node_count: int = 2) -> dict:
     rate_limit("aws")
     eks = _client("eks", region)
+    cluster_existed = False
     try:
         resp = eks.describe_cluster(name=cluster_name)
         status = resp["cluster"]["status"]
-        if status == "ACTIVE":
-            return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False}
+        cluster_existed = True
         if status in ("CREATING", "UPDATING"):
             # polls every 30s, up to 40 attempts (20 minutes)
             waiter = eks.get_waiter("cluster_active")
             waiter.wait(name=cluster_name, WaiterConfig={"Delay": 30, "MaxAttempts": 40})
-            return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False}
     except eks.exceptions.ResourceNotFoundException:
-        pass  # cluster doesn't exist — create it
+        cluster_existed = False
 
-    try:
-        result = subprocess.run(
-            [
-                "eksctl", "create", "cluster",
-                "--name", cluster_name,
-                "--region", region,
-                "--node-type", node_type,
-                "--nodes", str(node_count),
-                "--managed",
-            ],
-            capture_output=True, text=True,
-            stdin=subprocess.DEVNULL,
-            timeout=1500,  # eksctl blocks until ACTIVE — allow up to 25 minutes
-        )
-    except subprocess.TimeoutExpired:
-        raise TransientAwsError("eksctl timed out after 1500s")
-    if result.returncode != 0:
-        raise TransientAwsError(f"eksctl failed: {result.stderr[:400]}")
-    return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": True}
+    if not cluster_existed:
+        # Fresh cluster + managed node group in one eksctl call
+        try:
+            result = subprocess.run(
+                [
+                    "eksctl", "create", "cluster",
+                    "--name", cluster_name,
+                    "--region", region,
+                    "--node-type", node_type,
+                    "--nodes", str(node_count),
+                    "--managed",
+                ],
+                capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=1500,  # eksctl blocks until ACTIVE — allow up to 25 minutes
+            )
+        except subprocess.TimeoutExpired:
+            raise TransientAwsError("eksctl create cluster timed out after 1500s")
+        if result.returncode != 0:
+            raise TransientAwsError(f"eksctl create cluster failed: {result.stderr[:400]}")
+        return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": True, "nodegroup_created": True}
+
+    # Cluster already exists — verify it has at least one node group with healthy nodes.
+    # On resume, the cluster may be ACTIVE but the node group was never created (eksctl
+    # returned early on a previous run that found the cluster already present).
+    ngs = eks.list_nodegroups(clusterName=cluster_name).get("nodegroups", [])
+    if not ngs:
+        try:
+            ng_result = subprocess.run(
+                [
+                    "eksctl", "create", "nodegroup",
+                    "--cluster", cluster_name,
+                    "--region", region,
+                    "--name", "nexus-nodes",
+                    "--node-type", node_type,
+                    "--nodes", str(node_count),
+                    "--nodes-min", "1",
+                    "--nodes-max", str(node_count + 2),
+                    "--managed",
+                ],
+                capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=900,  # node group provisioning takes 8-15 min
+            )
+        except subprocess.TimeoutExpired:
+            raise TransientAwsError("eksctl create nodegroup timed out after 900s")
+        if ng_result.returncode != 0:
+            raise TransientAwsError(f"eksctl create nodegroup failed: {ng_result.stderr[:400]}")
+        ngs = ["nexus-nodes"]
+
+    return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False, "nodegroups": ngs}
 
 
 @registry.register(
