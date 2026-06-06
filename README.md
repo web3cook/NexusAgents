@@ -107,10 +107,13 @@ Expected: **96 tests passing**.
 # Show cost estimate only (no AWS calls, no build)
 nexus build "Build a SaaS app with user login and a billing dashboard" --dry-run
 
-# Full build and deploy to AWS
+# Full build and deploy to AWS (session files go to /tmp/nexus-workflow/<session-id>/)
 nexus build "Build a SaaS app with user login and a billing dashboard" \
-  --workspace /tmp/my-app \
   --region us-east-1
+
+# Use a custom root directory for session files
+nexus build "Build a SaaS app..." \
+  --workflow-dir ~/my-builds
 
 # With Telegram alerts
 nexus build "Build a task manager with projects, tasks, and team members" \
@@ -165,17 +168,30 @@ python cli.py --help
 
 ---
 
-## Resume and checkpoints
+## Session layout
 
-Every phase transition writes a checkpoint to `/tmp/nexus-checkpoints/<session-id>.json`. The session ID is printed at the start of each run.
+Every build gets its own directory under the workflow root:
+
+```
+/tmp/nexus-workflow/
+├── abc12345/               ← session ID (printed at start of every run)
+│   ├── checkpoint.json     ← full session state, saved after every phase
+│   ├── api/
+│   │   └── openapi.yaml    ← generated API spec
+│   ├── backend/            ← generated FastAPI app
+│   ├── frontend/           ← generated React app
+│   └── k8s/               ← rendered K8s manifests
+└── def67890/
+    └── ...
+```
 
 On `--resume`, Nexus:
-1. Loads the checkpoint
-2. Scans the workspace directory to recover any manifests that were built but not saved (e.g. if the process was killed mid-phase)
+1. Loads `checkpoint.json` from the specified (or latest) session directory
+2. Scans the session directory to recover any manifests that were built but not checkpointed (e.g. if the process was killed mid-phase)
 3. Corrects the current phase based on what's actually on disk
 4. Continues from where it left off without redoing completed work
 
-The checkpoint is also saved automatically on `SIGTERM` or any unexpected exit via `atexit`.
+`checkpoint.json` is also written automatically on `SIGTERM` or any unexpected exit.
 
 ---
 
