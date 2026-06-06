@@ -1,8 +1,13 @@
+"""The planner subagent that turns a description into a build plan."""
+
 from agent.subagents.base import BaseSubagent
 
 
 class PlannerSubagent(BaseSubagent):
+    """Analyzes the user description and produces AppSpec and CostSummary."""
+
     def __init__(self):
+        """Initializes the planner with its prompt, namespace, and model."""
         super().__init__(
             name="PlannerSubagent",
             system_prompt="""You are the Nexus Planner. Your job is to analyse a user's app description and produce a complete build plan.
@@ -19,5 +24,5 @@ Then output a <result> JSON block with keys:
 - cost_summary: {aws_monthly_usd, llm_tokens_estimated, llm_cost_usd, steps_estimated}
 - full_plan: [list of step names]""",
             allowed_namespaces=["plan"],
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
         )
