@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -46,6 +47,104 @@ def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     return files[0] if files else None
 
 
+def _phase_from_state(state: BuildState) -> Phase:
+    """Return the phase the build is actually at, based on what manifests exist."""
+    if state.deployment_result:
+        return Phase.MONITORING if state.test_report else Phase.TEST
+    if state.frontend_manifest:
+        return Phase.INFRA
+    if state.backend_manifest:
+        return Phase.FRONTEND
+    if state.app_spec and state.cost_summary:
+        return Phase.BACKEND
+    return Phase.PLANNING
+
+
+def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str]:
+    """Scan workspace files to recover any manifests missing from the checkpoint.
+
+    Returns the (possibly updated) state and a plain-text audit report to inject
+    into the orchestrator's message history so it knows what's already built.
+    """
+    ws = Path(workspace)
+    lines: list[str] = [f"[WORKSPACE AUDIT — session {state.session_id}]"]
+
+    # ── Backend ──────────────────────────────────────────────────────────────
+    if state.backend_manifest is None:
+        backend_root = ws / "backend"
+        py_files = sorted(backend_root.rglob("*.py")) if backend_root.exists() else []
+        dockerfile = backend_root / "Dockerfile"
+        if py_files and dockerfile.exists():
+            # Extract route prefixes from APIRouter definitions in route files
+            routes: list[str] = []
+            routes_dir = backend_root / "app" / "routes"
+            if routes_dir.exists():
+                for route_file in routes_dir.glob("*.py"):
+                    for m in re.finditer(r'prefix\s*=\s*["\']([^"\']+)["\']', route_file.read_text()):
+                        routes.append(m.group(1))
+            state.backend_manifest = BackendManifest(
+                files_created=[str(f) for f in py_files] + [str(dockerfile)],
+                api_routes=routes or ["/api"],
+                env_vars_required=["DATABASE_URL", "JWT_SECRET", "AWS_REGION", "CLUSTER_NAME"],
+                dockerfile_path=str(dockerfile),
+                test_results={"passed": 0, "failed": 0},
+            )
+            lines.append(
+                f"Backend: {len(py_files)} .py files found — backend_manifest populated"
+                f" ({len(routes)} routes detected)"
+            )
+        elif backend_root.exists():
+            lines.append(f"Backend: directory exists but incomplete ({len(py_files)} .py files, Dockerfile={'yes' if dockerfile.exists() else 'no'})")
+        else:
+            lines.append("Backend: not started")
+    else:
+        lines.append(f"Backend: already in checkpoint ({len(state.backend_manifest.files_created)} files)")
+
+    # ── Frontend ─────────────────────────────────────────────────────────────
+    if state.frontend_manifest is None:
+        # Handle double-nesting (frontend/frontend/) created by wrong workspace path
+        frontend_root = ws / "frontend"
+        if (frontend_root / "frontend").exists():
+            frontend_root = frontend_root / "frontend"
+            lines.append("Frontend: detected double-nested path (frontend/frontend/) — using inner dir")
+
+        tsx_files = sorted(frontend_root.rglob("*.tsx")) if frontend_root.exists() else []
+        ts_files  = sorted(frontend_root.rglob("*.ts"))  if frontend_root.exists() else []
+        dockerfile = frontend_root / "Dockerfile"
+        if (tsx_files or ts_files) and dockerfile.exists():
+            all_files = tsx_files + ts_files + [dockerfile]
+            state.frontend_manifest = FrontendManifest(
+                files_created=[str(f) for f in all_files],
+                dockerfile_path=str(dockerfile),
+                static_build_cmd="npm run build",
+                test_results={"passed": 0, "failed": 0},
+            )
+            lines.append(
+                f"Frontend: {len(tsx_files)} .tsx + {len(ts_files)} .ts files found"
+                " — frontend_manifest populated"
+            )
+        elif frontend_root.exists():
+            lines.append(f"Frontend: directory exists but incomplete ({len(tsx_files)} .tsx files, Dockerfile={'yes' if dockerfile.exists() else 'no'})")
+        else:
+            lines.append("Frontend: not started")
+    else:
+        lines.append(f"Frontend: already in checkpoint ({len(state.frontend_manifest.files_created)} files)")
+
+    # ── Phase correction ─────────────────────────────────────────────────────
+    correct_phase = _phase_from_state(state)
+    if correct_phase != state.current_phase:
+        lines.append(
+            f"Phase corrected: {state.current_phase.name} → {correct_phase.name}"
+            " (based on what was found on disk)"
+        )
+        state.current_phase = correct_phase
+    else:
+        lines.append(f"Phase confirmed: {state.current_phase.name}")
+
+    lines.append("Continuing build from the phase above — do not redo completed work.")
+    return state, "\n".join(lines)
+
+
 def run(
     user_description: str,
     workspace: str,
@@ -89,8 +188,28 @@ def run(
     logger.info("workspace: %s", workspace)
 
     messages: list[dict] = [
-        {"role": "user", "content": f"Build this app: {user_description}\nWorkspace: {workspace}"}
+        {
+            "role": "user",
+            "content": [{"type": "text",
+                          "text": f"Build this app: {user_description}\nWorkspace: {workspace}",
+                          "cache_control": {"type": "ephemeral"}}],
+        }
     ]
+
+    if resumed:
+        logger.info("[yellow]Auditing workspace before continuing...[/yellow]")
+        state, audit_report = _audit_workspace(state, workspace)
+        for line in audit_report.splitlines():
+            logger.info("  %s", line)
+        # Inject audit as a cached user message — it's stable context the model needs every turn
+        messages.append({
+            "role": "user",
+            "content": [{"type": "text", "text": audit_report,
+                          "cache_control": {"type": "ephemeral"}}],
+        })
+        # Save corrected state immediately
+        state.checkpoint(checkpoint_path)
+        logger.info("  checkpoint updated with audit results")
 
     current_phase_logged: Phase | None = None
     phase_error_counts: dict[Phase, int] = {}
