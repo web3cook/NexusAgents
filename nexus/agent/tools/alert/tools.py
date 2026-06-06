@@ -105,10 +105,15 @@ def list_alert_rules() -> dict:
 @instrument(namespace="alert", tool="query_recent_logs")
 def query_recent_logs(cluster_name: str, namespace: str, tail_lines: int = 200) -> dict:
     rate_limit("alert")
-    result = subprocess.run(
-        ["kubectl", "logs", "-n", namespace, "--all-containers", f"--tail={tail_lines}", "--prefix"],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["kubectl", "logs", "-n", namespace, "--all-containers",
+             f"--tail={tail_lines}", "--prefix"],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return {"logs": "", "lines": 0, "namespace": namespace, "error": "kubectl logs timed out after 30s"}
     return {"logs": result.stdout, "lines": len(result.stdout.splitlines()), "namespace": namespace}
 
 

@@ -6,6 +6,21 @@ from agent.core.retry import retry, rate_limit
 from agent.core.errors import NetworkError, NexusError
 
 
+def _docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run docker with a hard timeout and no interactive stdin."""
+    try:
+        return subprocess.run(
+            ["docker", *args],
+            capture_output=True, text=True, check=False,
+            stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        r = subprocess.CompletedProcess(["docker", *args], returncode=1)
+        r.stdout = ""
+        r.stderr = f"docker timed out after {timeout}s"
+        return r
+
+
 @registry.register(
     name="docker.build_image",
     description="Build a Docker image from a Dockerfile context directory",
@@ -23,10 +38,7 @@ from agent.core.errors import NetworkError, NexusError
 @retry(max_attempts=2, base_delay_seconds=2.0, retryable_on=[NexusError])
 def build_image(context_path: str, tag: str, dockerfile: str = "Dockerfile") -> dict:
     rate_limit("docker")
-    result = subprocess.run(
-        ["docker", "build", "-t", tag, "-f", dockerfile, context_path],
-        capture_output=True, text=True,
-    )
+    result = _docker("build", "-t", tag, "-f", dockerfile, context_path, timeout=900)
     if result.returncode != 0:
         raise NexusError(f"docker build failed: {result.stderr[:500]}", retryable=True)
     return {"tag": tag, "success": True, "stdout": result.stdout[-500:]}
@@ -44,7 +56,7 @@ def build_image(context_path: str, tag: str, dockerfile: str = "Dockerfile") -> 
 @instrument(namespace="docker", tool="tag_image")
 def tag_image(source_tag: str, target_tag: str) -> dict:
     rate_limit("docker")
-    result = subprocess.run(["docker", "tag", source_tag, target_tag], capture_output=True, text=True)
+    result = _docker("tag", source_tag, target_tag, timeout=30)
     if result.returncode != 0:
         raise NexusError(f"docker tag failed: {result.stderr}", retryable=False)
     return {"source_tag": source_tag, "target_tag": target_tag}
@@ -63,7 +75,7 @@ def tag_image(source_tag: str, target_tag: str) -> dict:
 @retry(max_attempts=3, base_delay_seconds=5.0, retryable_on=[NetworkError, NexusError])
 def push_to_ecr(image_tag: str, region: str) -> dict:
     rate_limit("docker")
-    result = subprocess.run(["docker", "push", image_tag], capture_output=True, text=True)
+    result = _docker("push", image_tag, timeout=600)
     if result.returncode != 0:
         raise NetworkError(f"docker push failed: {result.stderr[:300]}")
     return {"ecr_uri": image_tag, "pushed": True}
@@ -81,12 +93,11 @@ def push_to_ecr(image_tag: str, region: str) -> dict:
 @instrument(namespace="docker", tool="run_local")
 def run_local(image_tag: str, port: int = 8080) -> dict:
     rate_limit("docker")
-    result = subprocess.run(
-        ["docker", "run", "--rm", "-d", "-p", f"{port}:8000", image_tag],
-        capture_output=True, text=True,
-    )
+    result = _docker("run", "--rm", "-d", "-p", f"{port}:8000", image_tag, timeout=30)
     container_id = result.stdout.strip()
-    return {"container_id": container_id, "port": port, "started": result.returncode == 0}
+    if result.returncode != 0:
+        return {"container_id": "", "port": port, "started": False, "error": result.stderr[:200]}
+    return {"container_id": container_id, "port": port, "started": True}
 
 
 @registry.register(
@@ -101,9 +112,8 @@ def run_local(image_tag: str, port: int = 8080) -> dict:
 @instrument(namespace="docker", tool="inspect_image")
 def inspect_image(image_tag: str) -> dict:
     rate_limit("docker")
-    result = subprocess.run(
-        ["docker", "inspect", "--format", "{{.Size}}", image_tag],
-        capture_output=True, text=True,
-    )
+    result = _docker("inspect", "--format", "{{.Size}}", image_tag, timeout=15)
+    if result.returncode != 0:
+        return {"image_tag": image_tag, "size_mb": 0, "error": result.stderr[:200]}
     size_bytes = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
     return {"image_tag": image_tag, "size_mb": round(size_bytes / 1_048_576, 1)}
