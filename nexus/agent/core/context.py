@@ -42,9 +42,46 @@ def compress_phase(state: BuildState, phase: Phase) -> str:
 
 
 def summarise_messages(messages: list[dict], keep_last: int = 8) -> list[dict]:
-    """Keep the last N messages, prepend a summary of dropped messages."""
+    """Keep the last N messages, prepend a summary of dropped messages.
+
+    The cut point is always aligned to a clean boundary: a user message whose
+    content is plain text (not tool_result blocks).  Cutting between an
+    assistant tool_use and the user tool_result that answers it would cause a
+    400 from the Anthropic API.
+    """
     if len(messages) <= keep_last:
         return messages
-    dropped = messages[:-keep_last]
-    summary_text = f"[CONTEXT SUMMARY: {len(dropped)} earlier messages omitted. Work continues from previous phases.]"
-    return [{"role": "user", "content": summary_text}] + messages[-keep_last:]
+
+    # Start at the naive cut point and walk forward until we land on a user
+    # message with non-tool_result content (safe to start a conversation from).
+    cut = len(messages) - keep_last
+    while cut < len(messages):
+        msg = messages[cut]
+        content = msg.get("content", "")
+        is_plain_user = (
+            msg["role"] == "user"
+            and (
+                isinstance(content, str)
+                or (
+                    isinstance(content, list)
+                    and content
+                    and content[0].get("type") != "tool_result"
+                )
+            )
+        )
+        if is_plain_user:
+            break
+        cut += 1
+
+    if cut >= len(messages):
+        return messages  # every remaining message is a tool pair — keep all
+
+    dropped = messages[:cut]
+    if not dropped:
+        return messages
+
+    summary_text = (
+        f"[CONTEXT SUMMARY: {len(dropped)} earlier messages omitted. "
+        "Work continues from previous phases.]"
+    )
+    return [{"role": "user", "content": summary_text}] + messages[cut:]

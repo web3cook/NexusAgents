@@ -81,6 +81,9 @@ def run(user_description: str, workspace: str, checkpoint_dir: Path | None = Non
 
         namespaces = PHASE_TOOLS.get(state.current_phase)
         tools = registry.get_anthropic_tools(namespaces=namespaces) if namespaces else registry.get_anthropic_tools()
+        # Cache the full tool list — it's static per phase and the largest repeated payload.
+        if tools:
+            tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
 
         messages = summarise_messages(messages, keep_last=10)
 
