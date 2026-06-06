@@ -1,5 +1,6 @@
 from __future__ import annotations
 import atexit
+import json
 import logging
 import re
 import signal
@@ -162,7 +163,15 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
     else:
         lines.append(f"Phase confirmed: {state.current_phase.name}")
 
-    lines.append("Continuing build from the phase above — do not redo completed work.")
+    # ── AWS resources ─────────────────────────────────────────────────────────
+    if state.aws_resources:
+        lines.append("\n[ALREADY-PROVISIONED AWS RESOURCES — do not recreate these]")
+        for key, val in state.aws_resources.items():
+            lines.append(f"  {key}: {json.dumps(val)}")
+    else:
+        lines.append("AWS resources: none provisioned yet")
+
+    lines.append("\nContinuing build from the phase above — do not redo completed work.")
     return state, "\n".join(lines)
 
 
@@ -400,6 +409,12 @@ def run(
             )
             summary = compress_phase(state, state.current_phase)
             messages.append({"role": "user", "content": summary})
+            # On entering INFRA, remind the agent of already-provisioned resources
+            if new_phase == Phase.INFRA and state.aws_resources:
+                resource_note = "[ALREADY-PROVISIONED AWS RESOURCES — do not recreate]\n" + "\n".join(
+                    f"  {k}: {json.dumps(v)}" for k, v in state.aws_resources.items()
+                )
+                messages.append({"role": "user", "content": resource_note})
             state.current_phase = new_phase
             state.checkpoint(checkpoint_path)
             logger.info("  checkpoint saved: %s", checkpoint_path)
@@ -443,6 +458,23 @@ def _update_state(state: BuildState, tool_name: str, result: dict) -> None:
         for f in result.get("files_created", []):
             state.register_file(f, "frontend")
         state.set_agent_status("FrontendBuilderSubagent", AgentStatus.CODE_COMPLETED)
+    elif name == "aws.create_ecr_repo" and "repository_uri" in result:
+        key = result["repository_uri"].split("/")[-1]  # repo name
+        state.aws_resources[f"ecr:{key}"] = result
+    elif name == "aws.create_eks_cluster" and "cluster_name" in result:
+        state.aws_resources["eks:cluster"] = result
+    elif name == "aws.get_eks_kubeconfig" and result.get("kubeconfig_updated"):
+        state.aws_resources["eks:kubeconfig"] = result
+    elif name == "aws.create_rds_instance" and "db_identifier" in result:
+        state.aws_resources[f"rds:{result['db_identifier']}"] = result
+    elif name == "aws.get_rds_endpoint" and "endpoint" in result:
+        state.aws_resources.setdefault("rds:endpoint", {}).update(result)
+    elif name == "aws.create_s3_bucket" and "bucket_name" in result:
+        state.aws_resources[f"s3:{result['bucket_name']}"] = result
+    elif name == "aws.create_cloudfront_dist" and "distribution_id" in result:
+        state.aws_resources["cloudfront:dist"] = result
+    elif name == "aws.create_iam_role" and "role_arn" in result:
+        state.aws_resources[f"iam:{result['role_name']}"] = result
     elif name == "subagent.run_infra_provisioner" and "cluster_name" in result:
         state.deployment_result = DeploymentResult(**result)
         state.set_agent_status("InfraSubagent", AgentStatus.CODE_COMPLETED)

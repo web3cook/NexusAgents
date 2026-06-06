@@ -104,6 +104,7 @@ class BuildState:
     # Agent lifecycle tracking
     agent_statuses: dict[str, str] = field(default_factory=dict)   # agent_name → AgentStatus.value
     file_registry: list[dict] = field(default_factory=list)         # [{path, category, created_at}]
+    aws_resources: dict = field(default_factory=dict)               # resource_type → {id, arn, ...}
     cost_tracking: dict = field(default_factory=lambda: {
         "total_usd": 0.0,
         "input_tokens": 0,
@@ -177,6 +178,7 @@ class BuildState:
         data.setdefault("agent_statuses", {})
         data.setdefault("file_registry", [])
         data.setdefault("api_spec_path", None)
+        data.setdefault("aws_resources", {})
         data.setdefault("cost_tracking", {
             "total_usd": 0.0, "input_tokens": 0, "output_tokens": 0,
             "cache_read_tokens": 0, "cache_creation_tokens": 0,
