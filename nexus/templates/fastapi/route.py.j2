@@ -1,0 +1,27 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from typing import List
+from app.database import get_db
+from app.models.{{ model_name | lower }} import {{ model_name }}
+
+router = APIRouter()
+
+class {{ model_name }}Create(BaseModel):
+    {% for field in fields %}{{ field.name }}: {{ field.python_type }}
+    {% endfor %}
+
+class {{ model_name }}Response({{ model_name }}Create):
+    id: int
+    class Config:
+        from_attributes = True
+
+@router.get("/", response_model=List[{{ model_name }}Response])
+def list_items(db: Session = Depends(get_db)):
+    return db.query({{ model_name }}).all()
+
+@router.post("/", response_model={{ model_name }}Response, status_code=201)
+def create_item(item: {{ model_name }}Create, db: Session = Depends(get_db)):
+    obj = {{ model_name }}(**item.model_dump())
+    db.add(obj); db.commit(); db.refresh(obj)
+    return obj

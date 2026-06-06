@@ -1,0 +1,11 @@
+from sqlalchemy import Column, Integer, String, DateTime, Boolean
+from datetime import datetime
+from app.database import Base
+
+class {{ model_name }}(Base):
+    __tablename__ = "{{ model_name | lower }}s"
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    {% for field in fields %}
+    {{ field.name }} = Column({{ field.column_type }}{% if field.nullable %}, nullable=True{% else %}, nullable=False{% endif %})
+    {% endfor %}

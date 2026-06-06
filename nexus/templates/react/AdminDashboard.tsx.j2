@@ -1,0 +1,45 @@
+import { useState, useEffect } from 'react'
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { api } from '../lib/api'
+
+interface Metrics { timestamp: string; cpu_percent: number; memory_mb: number; error_count: number }
+interface Summary { monthly_cost_usd: number; pods_healthy: number; pods_total: number }
+
+export default function AdminDashboard() {
+  const [metrics, setMetrics] = useState<Metrics[]>([])
+  const [summary, setSummary] = useState<Summary | null>(null)
+
+  useEffect(() => {
+    const fetch = () => {
+      api.get<Metrics[]>('/admin/metrics').then(r => setMetrics(r.data)).catch(() => {})
+      api.get<Summary>('/admin/summary').then(r => setSummary(r.data)).catch(() => {})
+    }
+    fetch()
+    const id = setInterval(fetch, 30_000)
+    return () => clearInterval(id)
+  }, [])
+
+  return (
+    <div className="container mx-auto p-6">
+      <h1 className="text-2xl font-bold mb-6">Admin Dashboard</h1>
+      {summary && (
+        <div className="grid grid-cols-3 gap-4 mb-8">
+          <div className="bg-white rounded border p-4"><p className="text-sm text-gray-500">Monthly AWS Cost</p><p className="text-3xl font-bold">${summary.monthly_cost_usd.toFixed(2)}</p></div>
+          <div className="bg-white rounded border p-4"><p className="text-sm text-gray-500">Pods Healthy</p><p className="text-3xl font-bold">{summary.pods_healthy}/{summary.pods_total}</p></div>
+        </div>
+      )}
+      <div className="bg-white rounded border p-4 mb-4">
+        <h2 className="font-semibold mb-2">CPU Usage (%)</h2>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={metrics}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="timestamp" /><YAxis /><Tooltip /><Line type="monotone" dataKey="cpu_percent" stroke="#6366f1" /></LineChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="bg-white rounded border p-4">
+        <h2 className="font-semibold mb-2">Error Count</h2>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={metrics}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="timestamp" /><YAxis /><Tooltip /><Line type="monotone" dataKey="error_count" stroke="#ef4444" /></LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}

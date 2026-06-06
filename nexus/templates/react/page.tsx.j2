@@ -1,0 +1,35 @@
+import { useState, useEffect } from 'react'
+import { api } from '../lib/api'
+
+interface {{ model_name }} {
+  id: number
+  {% for field in fields %}{{ field.name }}: {{ field.ts_type }}
+  {% endfor %}
+}
+
+export default function {{ page_name }}() {
+  const [items, setItems] = useState<{{ model_name }}[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.get<{{ model_name }}[]>('/{{ route_prefix }}')
+      .then(r => { setItems(r.data); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div className="p-8">Loading...</div>
+
+  return (
+    <div className="container mx-auto p-6">
+      <h1 className="text-2xl font-bold mb-6">{{ page_title }}</h1>
+      <div className="grid gap-4">
+        {items.map(item => (
+          <div key={item.id} className="bg-white border rounded p-4 shadow-sm">
+            {% for field in fields %}<p><span className="font-medium">{{ field.label }}:</span> {item.{{ field.name }}}</p>
+            {% endfor %}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

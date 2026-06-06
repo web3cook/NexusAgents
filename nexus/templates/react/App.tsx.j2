@@ -1,0 +1,29 @@
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
+import Login from './pages/Login'
+import Register from './pages/Register'
+import AdminDashboard from './pages/AdminDashboard'
+{% for page in pages %}import {{ page }} from './pages/{{ page }}'
+{% endfor %}
+
+function PrivateRoute({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated } = useAuth()
+  return isAuthenticated ? <>{children}</> : <Navigate to="/login" />
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/admin" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
+          {% for page in pages %}<Route path="/{{ page | lower }}" element={<PrivateRoute><{{ page }} /></PrivateRoute>} />
+          {% endfor %}
+          <Route path="/" element={<Navigate to="/{{ pages[0] | lower if pages else 'admin' }}" />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
+  )
+}
