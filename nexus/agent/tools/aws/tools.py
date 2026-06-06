@@ -53,17 +53,37 @@ def create_ecr_repo(repo_name: str, region: str) -> dict:
 @retry(max_attempts=2, base_delay_seconds=10.0, retryable_on=[TransientAwsError, NetworkError])
 def create_eks_cluster(cluster_name: str, region: str, node_type: str = "t3.medium", node_count: int = 2) -> dict:
     rate_limit("aws")
-    result = subprocess.run([
-        "eksctl", "create", "cluster",
-        "--name", cluster_name,
-        "--region", region,
-        "--node-type", node_type,
-        "--nodes", str(node_count),
-        "--managed",
-    ], capture_output=True, text=True)
+    # Check if the cluster already exists and is active — skip creation if so
+    eks = _client("eks", region)
+    try:
+        resp = eks.describe_cluster(name=cluster_name)
+        status = resp["cluster"]["status"]
+        if status == "ACTIVE":
+            return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False}
+        if status in ("CREATING", "UPDATING"):
+            # Wait for it to become active using the boto3 waiter (polls every 30s, up to 40 attempts)
+            waiter = eks.get_waiter("cluster_active")
+            waiter.wait(name=cluster_name, WaiterConfig={"Delay": 30, "MaxAttempts": 40})
+            return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": False}
+    except eks.exceptions.ResourceNotFoundException:
+        pass  # cluster doesn't exist yet — create it
+
+    result = subprocess.run(
+        [
+            "eksctl", "create", "cluster",
+            "--name", cluster_name,
+            "--region", region,
+            "--node-type", node_type,
+            "--nodes", str(node_count),
+            "--managed",
+        ],
+        capture_output=True, text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=1500,  # eksctl blocks until ACTIVE — allow up to 25 minutes
+    )
     if result.returncode != 0:
         raise TransientAwsError(f"eksctl failed: {result.stderr[:400]}")
-    return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE"}
+    return {"cluster_name": cluster_name, "region": region, "status": "ACTIVE", "created": True}
 
 
 @registry.register(
@@ -78,10 +98,11 @@ def create_eks_cluster(cluster_name: str, region: str, node_type: str = "t3.medi
 @instrument(namespace="aws", tool="get_eks_kubeconfig")
 def get_eks_kubeconfig(cluster_name: str, region: str) -> dict:
     rate_limit("aws")
-    result = subprocess.run([
-        "aws", "eks", "update-kubeconfig",
-        "--name", cluster_name, "--region", region,
-    ], capture_output=True, text=True)
+    result = subprocess.run(
+        ["aws", "eks", "update-kubeconfig", "--name", cluster_name, "--region", region],
+        capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=60,
+    )
     if result.returncode != 0:
         raise TransientAwsError(f"update-kubeconfig failed: {result.stderr[:300]}")
     return {"cluster_name": cluster_name, "kubeconfig_updated": True}
