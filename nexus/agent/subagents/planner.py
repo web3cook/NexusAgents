@@ -19,5 +19,5 @@ Then output a <result> JSON block with keys:
 - cost_summary: {aws_monthly_usd, llm_tokens_estimated, llm_cost_usd, steps_estimated}
 - full_plan: [list of step names]""",
             allowed_namespaces=["plan"],
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
         )

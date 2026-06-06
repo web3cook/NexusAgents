@@ -1,6 +1,8 @@
 from __future__ import annotations
+import atexit
 import logging
 import re
+import signal
 import time
 import uuid
 from pathlib import Path
@@ -8,7 +10,7 @@ import anthropic
 import agent.tools  # noqa: F401 — triggers all @registry.register decorators
 from agent.tools.registry import registry
 from agent.core.state import (
-    BuildState, Phase, set_session_id,
+    AgentStatus, BuildState, Phase, set_session_id,
     AppSpec, CostSummary, BackendManifest, FrontendManifest, DeploymentResult, TestReport,
 )
 from agent.core.context import compress_phase, summarise_messages
@@ -20,52 +22,62 @@ SYSTEM_PROMPT = """You are Nexus, an autonomous full-stack application builder a
 
 Given a user's app description, you will:
 1. Use subagent.run_planner to plan the build and show cost estimates
-2. Use subagent.run_backend_builder to scaffold the FastAPI backend
-3. Use subagent.run_frontend_builder to scaffold the React frontend
+2. [API_SPEC phase is handled automatically — do not call generate_api_spec directly]
+3. [BUILD phase runs backend + frontend in parallel automatically — do not call builders directly]
 4. Build and push Docker images using docker.* tools
 5. Use subagent.run_infra_provisioner to deploy to AWS EKS
 6. Run tests using test.* tools
 7. Use subagent.run_alerting to start persistent log monitoring
 
-Work through phases in order: PLANNING → BACKEND → FRONTEND → INFRA → TEST → MONITORING.
+Work through phases in order: PLANNING → API_SPEC → BUILD → INFRA → TEST → MONITORING.
 After each phase, summarise what was accomplished before moving to the next.
 The workspace directory is provided in the first message."""
 
 PHASE_TOOLS = {
     Phase.PLANNING:   ["subagent", "plan"],
-    Phase.BACKEND:    ["subagent", "code", "test"],
-    Phase.FRONTEND:   ["subagent", "code", "test"],
+    Phase.API_SPEC:   [],                            # deterministic — no LLM call
+    Phase.BUILD:      [],                            # parallel subprocess — no LLM call
     Phase.INFRA:      ["subagent", "aws", "k8s", "docker", "code"],
     Phase.TEST:       ["test"],
     Phase.MONITORING: ["subagent", "alert"],
 }
 
+# ── Emergency save ────────────────────────────────────────────────────────────
+
+_active_state: BuildState | None = None
+_active_checkpoint: Path | None = None
+
+
+def _emergency_save(signum=None, frame=None) -> None:
+    if _active_state and _active_checkpoint:
+        try:
+            _active_state.checkpoint(_active_checkpoint)
+            logger.info("[yellow]Emergency checkpoint saved: %s[/yellow]", _active_checkpoint)
+        except Exception as exc:
+            logger.error("Emergency save failed: %s", exc)
+
+
+# ── Resume helpers ────────────────────────────────────────────────────────────
 
 def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
-    """Return the most recently written checkpoint file, or None."""
     files = sorted(checkpoint_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     return files[0] if files else None
 
 
 def _phase_from_state(state: BuildState) -> Phase:
-    """Return the phase the build is actually at, based on what manifests exist."""
     if state.deployment_result:
         return Phase.MONITORING if state.test_report else Phase.TEST
-    if state.frontend_manifest:
+    if state.frontend_manifest and state.backend_manifest:
         return Phase.INFRA
-    if state.backend_manifest:
-        return Phase.FRONTEND
+    if state.app_spec and state.cost_summary and state.api_spec_path:
+        return Phase.BUILD
     if state.app_spec and state.cost_summary:
-        return Phase.BACKEND
+        return Phase.API_SPEC
     return Phase.PLANNING
 
 
 def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str]:
-    """Scan workspace files to recover any manifests missing from the checkpoint.
-
-    Returns the (possibly updated) state and a plain-text audit report to inject
-    into the orchestrator's message history so it knows what's already built.
-    """
+    """Scan workspace files to recover any manifests missing from the checkpoint."""
     ws = Path(workspace)
     lines: list[str] = [f"[WORKSPACE AUDIT — session {state.session_id}]"]
 
@@ -75,7 +87,6 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
         py_files = sorted(backend_root.rglob("*.py")) if backend_root.exists() else []
         dockerfile = backend_root / "Dockerfile"
         if py_files and dockerfile.exists():
-            # Extract route prefixes from APIRouter definitions in route files
             routes: list[str] = []
             routes_dir = backend_root / "app" / "routes"
             if routes_dir.exists():
@@ -94,7 +105,7 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
                 f" ({len(routes)} routes detected)"
             )
         elif backend_root.exists():
-            lines.append(f"Backend: directory exists but incomplete ({len(py_files)} .py files, Dockerfile={'yes' if dockerfile.exists() else 'no'})")
+            lines.append(f"Backend: incomplete ({len(py_files)} .py, Dockerfile={'yes' if dockerfile.exists() else 'no'})")
         else:
             lines.append("Backend: not started")
     else:
@@ -102,12 +113,10 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
 
     # ── Frontend ─────────────────────────────────────────────────────────────
     if state.frontend_manifest is None:
-        # Handle double-nesting (frontend/frontend/) created by wrong workspace path
         frontend_root = ws / "frontend"
         if (frontend_root / "frontend").exists():
             frontend_root = frontend_root / "frontend"
-            lines.append("Frontend: detected double-nested path (frontend/frontend/) — using inner dir")
-
+            lines.append("Frontend: detected double-nested path — using inner dir")
         tsx_files = sorted(frontend_root.rglob("*.tsx")) if frontend_root.exists() else []
         ts_files  = sorted(frontend_root.rglob("*.ts"))  if frontend_root.exists() else []
         dockerfile = frontend_root / "Dockerfile"
@@ -120,23 +129,30 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
                 test_results={"passed": 0, "failed": 0},
             )
             lines.append(
-                f"Frontend: {len(tsx_files)} .tsx + {len(ts_files)} .ts files found"
-                " — frontend_manifest populated"
+                f"Frontend: {len(tsx_files)} .tsx + {len(ts_files)} .ts files — frontend_manifest populated"
             )
         elif frontend_root.exists():
-            lines.append(f"Frontend: directory exists but incomplete ({len(tsx_files)} .tsx files, Dockerfile={'yes' if dockerfile.exists() else 'no'})")
+            lines.append(f"Frontend: incomplete ({len(tsx_files)} .tsx, Dockerfile={'yes' if dockerfile.exists() else 'no'})")
         else:
             lines.append("Frontend: not started")
     else:
         lines.append(f"Frontend: already in checkpoint ({len(state.frontend_manifest.files_created)} files)")
 
+    # ── API spec ─────────────────────────────────────────────────────────────
+    if state.api_spec_path is None:
+        candidate = ws / "api" / "openapi.yaml"
+        if candidate.exists():
+            state.api_spec_path = str(candidate)
+            lines.append(f"API spec: found at {candidate}")
+        else:
+            lines.append("API spec: not found")
+    else:
+        lines.append(f"API spec: already in checkpoint ({state.api_spec_path})")
+
     # ── Phase correction ─────────────────────────────────────────────────────
     correct_phase = _phase_from_state(state)
     if correct_phase != state.current_phase:
-        lines.append(
-            f"Phase corrected: {state.current_phase.name} → {correct_phase.name}"
-            " (based on what was found on disk)"
-        )
+        lines.append(f"Phase corrected: {state.current_phase.name} → {correct_phase.name}")
         state.current_phase = correct_phase
     else:
         lines.append(f"Phase confirmed: {state.current_phase.name}")
@@ -145,6 +161,8 @@ def _audit_workspace(state: BuildState, workspace: str) -> tuple[BuildState, str
     return state, "\n".join(lines)
 
 
+# ── Main orchestrator ─────────────────────────────────────────────────────────
+
 def run(
     user_description: str,
     workspace: str,
@@ -152,6 +170,8 @@ def run(
     resume: bool = False,
     session_id: str | None = None,
 ) -> BuildState:
+    global _active_state, _active_checkpoint
+
     checkpoint_dir = checkpoint_dir or Path("/tmp/nexus-checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,12 +180,12 @@ def run(
         if session_id:
             checkpoint_path = checkpoint_dir / f"{session_id}.json"
             if not checkpoint_path.exists():
-                logger.error("No checkpoint found for session %s in %s", session_id, checkpoint_dir)
+                logger.error("No checkpoint for session %s in %s", session_id, checkpoint_dir)
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         else:
             checkpoint_path = _latest_checkpoint(checkpoint_dir)
             if not checkpoint_path:
-                logger.warning("--resume requested but no checkpoint found in %s — starting fresh", checkpoint_dir)
+                logger.warning("--resume requested but no checkpoint found — starting fresh")
                 checkpoint_path = None
 
         if checkpoint_path:
@@ -182,6 +202,26 @@ def run(
         set_session_id(session_id)
         state = BuildState(session_id=session_id, user_description=user_description)
         checkpoint_path = checkpoint_dir / f"{session_id}.json"
+
+    # Wire emergency save
+    _active_state = state
+    _active_checkpoint = checkpoint_path
+    atexit.register(_emergency_save)
+    signal.signal(signal.SIGTERM, _emergency_save)
+
+    # Wire status callbacks so subagent tools update checkpoint on every status change
+    from agent.tools.subagent.tools import set_status_callback
+    from agent.core.state import AgentStatus as _AgentStatus
+
+    def _status_cb(agent_name: str, status_str: str) -> None:
+        try:
+            status = _AgentStatus(status_str)
+        except ValueError:
+            return
+        state.set_agent_status(agent_name, status)
+        state.checkpoint(checkpoint_path)
+
+    set_status_callback(_status_cb)
 
     build_start = time.monotonic()
     logger.info("[bold]session %s[/bold] — %s", state.session_id, user_description[:100])
@@ -201,19 +241,17 @@ def run(
         state, audit_report = _audit_workspace(state, workspace)
         for line in audit_report.splitlines():
             logger.info("  %s", line)
-        # Inject audit as a cached user message — it's stable context the model needs every turn
         messages.append({
             "role": "user",
             "content": [{"type": "text", "text": audit_report,
                           "cache_control": {"type": "ephemeral"}}],
         })
-        # Save corrected state immediately
         state.checkpoint(checkpoint_path)
         logger.info("  checkpoint updated with audit results")
 
     current_phase_logged: Phase | None = None
     phase_error_counts: dict[Phase, int] = {}
-    MAX_PHASE_ERRORS = 3  # bail out if the same phase keeps returning subagent errors
+    MAX_PHASE_ERRORS = 3
 
     while state.current_phase != Phase.COMPLETE:
         if state.current_phase != current_phase_logged:
@@ -226,9 +264,55 @@ def run(
             )
             current_phase_logged = state.current_phase
 
+        # ── API_SPEC — deterministic, no LLM call ────────────────────────────
+        if state.current_phase == Phase.API_SPEC:
+            from agent.tools.plan.tools import generate_api_spec
+            spec = state.app_spec
+            result = generate_api_spec(
+                app_name="NexusApp",
+                api_routes=spec.api_routes,
+                db_models=spec.db_models,
+                features=spec.features,
+                output_dir=str(Path(workspace) / "api"),
+            )
+            state.api_spec_path = result["output_path"]
+            state.register_file(result["output_path"], "api_spec")
+            logger.info("  API spec written: %s (%d routes)", result["output_path"], result["route_count"])
+            state.current_phase = Phase.BUILD
+            state.checkpoint(checkpoint_path)
+            continue
+
+        # ── BUILD — parallel subprocess, no LLM call ─────────────────────────
+        if state.current_phase == Phase.BUILD:
+            from agent.core.parallel import pre_render_build_templates, run_build_parallel
+            logger.info("  Pre-rendering Docker/K8s templates...")
+            rendered = pre_render_build_templates(state.app_spec, workspace)
+            for f in rendered:
+                state.register_file(f, "template")
+            logger.info("  Starting parallel backend + frontend build...")
+            backend_result, frontend_result = run_build_parallel(state.app_spec, workspace, state)
+            _update_state(state, "subagent.run_backend_builder", backend_result)
+            _update_state(state, "subagent.run_frontend_builder", frontend_result)
+            new_phase = _infer_next_phase(state)
+            if new_phase != state.current_phase:
+                logger.info(
+                    "[green]✓[/green] BUILD complete → entering %s", new_phase.name,
+                )
+                state.current_phase = new_phase
+                state.checkpoint(checkpoint_path)
+            else:
+                # Both builders failed — treat as phase error
+                count = phase_error_counts.get(Phase.BUILD, 0) + 1
+                phase_error_counts[Phase.BUILD] = count
+                logger.warning("BUILD phase failed (%d/%d)", count, MAX_PHASE_ERRORS)
+                if count >= MAX_PHASE_ERRORS:
+                    logger.error("[red]BUILD failed %d times — aborting.[/red]", count)
+                    state.current_phase = Phase.COMPLETE
+            continue
+
+        # ── LLM-driven phases ─────────────────────────────────────────────────
         namespaces = PHASE_TOOLS.get(state.current_phase)
         tools = registry.get_anthropic_tools(namespaces=namespaces) if namespaces else registry.get_anthropic_tools()
-        # Cache the full tool list — it's static per phase and the largest repeated payload.
         if tools:
             tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
 
@@ -240,6 +324,13 @@ def run(
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             tools=tools,
             messages=messages,
+        )
+        state.add_cost(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_read=getattr(response.usage, "cache_read_input_tokens", 0),
+            cache_creation=getattr(response.usage, "cache_creation_input_tokens", 0),
+            model="claude-opus-4-8",
         )
 
         tool_results = []
@@ -261,13 +352,12 @@ def run(
                         count = phase_error_counts.get(state.current_phase, 0) + 1
                         phase_error_counts[state.current_phase] = count
                         logger.warning(
-                            "  subagent returned error in phase %s (%d/%d): %s",
+                            "  subagent error in %s (%d/%d): %s",
                             state.current_phase.name, count, MAX_PHASE_ERRORS, result["error"],
                         )
                         if count >= MAX_PHASE_ERRORS:
                             logger.error(
-                                "[red]Phase %s failed %d times — aborting build.[/red] "
-                                "Re-run with --resume after fixing the issue.",
+                                "[red]Phase %s failed %d times — aborting.[/red]",
                                 state.current_phase.name, count,
                             )
                             state.current_phase = Phase.COMPLETE
@@ -304,14 +394,13 @@ def run(
 
     elapsed = time.monotonic() - build_start
     logger.info(
-        "[bold green]BUILD COMPLETE[/bold green] — %d tool calls in %.1fs",
-        state.tool_call_count, elapsed,
+        "[bold green]BUILD COMPLETE[/bold green] — %d tool calls in %.1fs  cost=$%.4f",
+        state.tool_call_count, elapsed, state.cost_tracking["total_usd"],
     )
     return state
 
 
 def _result_summary(result: object) -> str:
-    """One-line summary of a tool result for logging."""
     if not isinstance(result, dict):
         return ""
     if "error" in result:
@@ -321,7 +410,6 @@ def _result_summary(result: object) -> str:
 
 
 def _update_state(state: BuildState, tool_name: str, result: dict) -> None:
-    # Normalize API form ('namespace__tool') to registry form ('namespace.tool')
     name = registry._registry_name(tool_name) if "__" in tool_name else tool_name
     if name == "subagent.run_planner" and "app_spec" in result:
         spec = result["app_spec"]
@@ -329,12 +417,20 @@ def _update_state(state: BuildState, tool_name: str, result: dict) -> None:
         if "cost_summary" in result:
             cs = result["cost_summary"]
             state.cost_summary = CostSummary(**cs) if isinstance(cs, dict) else cs
+        state.set_agent_status("PlannerSubagent", AgentStatus.CODE_COMPLETED)
     elif name == "subagent.run_backend_builder" and "files_created" in result:
         state.backend_manifest = BackendManifest(**result)
+        for f in result.get("files_created", []):
+            state.register_file(f, "backend")
+        state.set_agent_status("BackendBuilderSubagent", AgentStatus.CODE_COMPLETED)
     elif name == "subagent.run_frontend_builder" and "files_created" in result:
         state.frontend_manifest = FrontendManifest(**result)
+        for f in result.get("files_created", []):
+            state.register_file(f, "frontend")
+        state.set_agent_status("FrontendBuilderSubagent", AgentStatus.CODE_COMPLETED)
     elif name == "subagent.run_infra_provisioner" and "cluster_name" in result:
         state.deployment_result = DeploymentResult(**result)
+        state.set_agent_status("InfraSubagent", AgentStatus.CODE_COMPLETED)
     elif name in ("test.run_integration_tests", "test.run_e2e_tests"):
         if state.test_report is None:
             state.test_report = TestReport(
@@ -344,16 +440,18 @@ def _update_state(state: BuildState, tool_name: str, result: dict) -> None:
         if name == "test.run_integration_tests":
             state.test_report.integration_passed = result.get("passed", 0)
             state.test_report.integration_failed = result.get("failed", 0)
+            state.set_agent_status("BackendBuilderSubagent", AgentStatus.TESTED)
         else:
             state.test_report.e2e_passed = 1 if result.get("passed") else 0
+            state.set_agent_status("FrontendBuilderSubagent", AgentStatus.TESTED)
 
 
 def _infer_next_phase(state: BuildState) -> Phase:
     if state.current_phase == Phase.PLANNING and state.app_spec and state.cost_summary:
-        return Phase.BACKEND
-    if state.current_phase == Phase.BACKEND and state.backend_manifest:
-        return Phase.FRONTEND
-    if state.current_phase == Phase.FRONTEND and state.frontend_manifest:
+        return Phase.API_SPEC
+    if state.current_phase == Phase.API_SPEC and state.api_spec_path:
+        return Phase.BUILD
+    if state.current_phase == Phase.BUILD and state.backend_manifest and state.frontend_manifest:
         return Phase.INFRA
     if state.current_phase == Phase.INFRA and state.deployment_result:
         return Phase.TEST

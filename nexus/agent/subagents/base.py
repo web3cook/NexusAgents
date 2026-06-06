@@ -31,6 +31,35 @@ class BaseSubagent:
         self.model = model
         self.max_iterations = max_iterations
         self._logger = logging.getLogger(f"nexus.subagent.{name}")
+        self.total_cost_usd: float = 0.0
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+        self.total_cache_read: int = 0
+        self.total_cache_creation: int = 0
+        self._api_calls: int = 0
+
+    def _accumulate_usage(self, usage) -> None:
+        from agent.core.cost import compute_cost
+        inp = getattr(usage, "input_tokens", 0)
+        out = getattr(usage, "output_tokens", 0)
+        cr  = getattr(usage, "cache_read_input_tokens", 0)
+        cc  = getattr(usage, "cache_creation_input_tokens", 0)
+        self.total_input_tokens   += inp
+        self.total_output_tokens  += out
+        self.total_cache_read     += cr
+        self.total_cache_creation += cc
+        self._api_calls           += 1
+        self.total_cost_usd       += compute_cost(inp, out, cr, cc, self.model)
+
+    def cost_summary(self) -> dict:
+        return {
+            "total_cost_usd":    round(self.total_cost_usd, 6),
+            "input_tokens":      self.total_input_tokens,
+            "output_tokens":     self.total_output_tokens,
+            "cache_read_tokens": self.total_cache_read,
+            "calls":             self._api_calls,
+            "model":             self.model,
+        }
 
     def get_tools(self) -> list[dict]:
         tools = registry.get_anthropic_tools(namespaces=self.allowed_namespaces)
@@ -40,8 +69,8 @@ class BaseSubagent:
 
     def run(self, input_data: dict) -> dict:
         self._logger.info(
-            "[bold cyan]%s[/bold cyan] starting  [dim]namespaces=%s[/dim]",
-            self.name, self.allowed_namespaces,
+            "[bold cyan]%s[/bold cyan] starting  [dim]namespaces=%s model=%s[/dim]",
+            self.name, self.allowed_namespaces, self.model,
         )
         self._logger.debug("  input: %s", {k: str(v)[:80] for k, v in input_data.items()})
 
@@ -61,6 +90,7 @@ class BaseSubagent:
                 tools=tools,
                 messages=messages,
             )
+            self._accumulate_usage(response.usage)
 
             tool_results = []
             for block in response.content:

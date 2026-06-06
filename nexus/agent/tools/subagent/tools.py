@@ -1,7 +1,20 @@
 from __future__ import annotations
+from typing import Callable
 from agent.tools.registry import registry
 from agent.core.observability import instrument
 from agent.core.retry import rate_limit
+
+_status_callback: Callable[[str, str], None] | None = None
+
+
+def set_status_callback(cb: Callable[[str, str], None]) -> None:
+    global _status_callback
+    _status_callback = cb
+
+
+def _notify(agent_name: str, status: str) -> None:
+    if _status_callback:
+        _status_callback(agent_name, status)
 
 
 @registry.register(
@@ -17,7 +30,10 @@ from agent.core.retry import rate_limit
 def run_planner(user_description: str) -> dict:
     rate_limit("subagent")
     from agent.subagents.planner import PlannerSubagent
-    return PlannerSubagent().run({"user_description": user_description})
+    _notify("PlannerSubagent", "Ongoing")
+    result = PlannerSubagent().run({"user_description": user_description})
+    _notify("PlannerSubagent", "Code Completed" if "error" not in result else "Ongoing")
+    return result
 
 
 @registry.register(
@@ -36,7 +52,10 @@ def run_planner(user_description: str) -> dict:
 def run_backend_builder(app_spec: dict, workspace: str) -> dict:
     rate_limit("subagent")
     from agent.subagents.backend_builder import BackendBuilderSubagent
-    return BackendBuilderSubagent().run({"app_spec": app_spec, "workspace": workspace})
+    _notify("BackendBuilderSubagent", "Ongoing")
+    result = BackendBuilderSubagent().run({"app_spec": app_spec, "workspace": workspace})
+    _notify("BackendBuilderSubagent", "Code Completed" if "error" not in result else "Ongoing")
+    return result
 
 
 @registry.register(
@@ -56,7 +75,10 @@ def run_backend_builder(app_spec: dict, workspace: str) -> dict:
 def run_frontend_builder(app_spec: dict, api_routes: list[str], workspace: str) -> dict:
     rate_limit("subagent")
     from agent.subagents.frontend_builder import FrontendBuilderSubagent
-    return FrontendBuilderSubagent().run({"app_spec": app_spec, "api_routes": api_routes, "workspace": workspace})
+    _notify("FrontendBuilderSubagent", "Ongoing")
+    result = FrontendBuilderSubagent().run({"app_spec": app_spec, "api_routes": api_routes, "workspace": workspace})
+    _notify("FrontendBuilderSubagent", "Code Completed" if "error" not in result else "Ongoing")
+    return result
 
 
 @registry.register(
@@ -80,11 +102,14 @@ def run_infra_provisioner(app_spec: dict, backend_ecr_uri: str, frontend_ecr_uri
                            env_vars_required: list[str], workspace: str, region: str) -> dict:
     rate_limit("subagent")
     from agent.subagents.infra import InfraSubagent
-    return InfraSubagent().run({
+    _notify("InfraSubagent", "Ongoing")
+    result = InfraSubagent().run({
         "app_spec": app_spec, "backend_ecr_uri": backend_ecr_uri,
         "frontend_ecr_uri": frontend_ecr_uri, "env_vars_required": env_vars_required,
         "workspace": workspace, "region": region,
     })
+    _notify("InfraSubagent", "Code Completed" if "error" not in result else "Ongoing")
+    return result
 
 
 @registry.register(
@@ -106,6 +131,7 @@ def run_alerting(cluster_name: str, namespace: str, telegram_bot_token: str, tel
     rate_limit("subagent")
     import threading
     from agent.subagents.alerting import AlertingSubagent
+    _notify("AlertingSubagent", "Ongoing")
     agent = AlertingSubagent()
     thread = threading.Thread(
         target=agent.run,

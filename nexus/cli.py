@@ -28,6 +28,22 @@ _LOG_LEVELS: dict[LogLevel, int] = {
 }
 
 
+def _print_cost(console: Console, state) -> None:
+    ct = state.cost_tracking
+    if ct["calls"] == 0:
+        return
+    console.print("\n[bold]Cost breakdown:[/bold]")
+    console.print(f"  Total LLM cost: [green]${ct['total_usd']:.4f}[/green]")
+    console.print(f"  Input tokens:   {ct['input_tokens']:,}")
+    console.print(f"  Output tokens:  {ct['output_tokens']:,}")
+    console.print(f"  Cache reads:    {ct['cache_read_tokens']:,}")
+    console.print(f"  API calls:      {ct['calls']}")
+    if ct.get("by_model"):
+        console.print("  By model:")
+        for model, info in sorted(ct["by_model"].items()):
+            console.print(f"    {model}: ${info['usd']:.4f} ({info['calls']} calls)")
+
+
 @app.command()
 def build(
     description: str = typer.Argument(..., help="Natural language description of the app to build"),
@@ -85,9 +101,13 @@ def build(
             console.print(f"\nTool calls: {state.tool_call_count}")
         else:
             console.print("[red]Build did not complete — check logs[/red]")
+        _print_cost(console, state)
+        if not state.deployment_result:
             sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted. Run with --resume to continue.[/yellow]")
+        if "state" in dir():
+            _print_cost(console, state)
         sys.exit(130)
 
 

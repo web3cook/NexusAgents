@@ -1,4 +1,5 @@
-from agent.tools.plan.tools import analyze_spec, estimate_steps, estimate_tokens, estimate_aws_cost, render_summary, render_full_plan
+import yaml
+from agent.tools.plan.tools import analyze_spec, estimate_steps, estimate_tokens, estimate_aws_cost, render_summary, render_full_plan, generate_api_spec
 
 def test_analyze_spec_extracts_features():
     result = analyze_spec(user_description="Build a SaaS app with user login, an alerting dashboard, and an API key manager")
@@ -39,3 +40,35 @@ def test_render_summary_returns_string():
 def test_render_full_plan_lists_steps():
     result = render_full_plan(steps=["plan.analyze_spec", "code.scaffold_fastapi_project"])
     assert len(result["plan"]) == 2
+
+
+def test_generate_api_spec_returns_valid_openapi():
+    result = generate_api_spec(
+        app_name="TestApp",
+        api_routes=["/auth/login", "/users", "/posts"],
+        db_models=["User", "Post"],
+        features=["auth"],
+    )
+    assert "openapi_yaml" in result
+    assert "output_path" in result
+    spec = yaml.safe_load(result["openapi_yaml"])
+    assert spec["openapi"] == "3.0.0"
+    assert "/auth/login" in spec["paths"]
+    assert "components" in spec
+    assert "schemas" in spec["components"]
+    assert "User" in spec["components"]["schemas"]
+
+
+def test_generate_api_spec_writes_file():
+    import tempfile
+    import os
+    with tempfile.TemporaryDirectory() as d:
+        result = generate_api_spec(
+            app_name="TestApp",
+            api_routes=["/health"],
+            db_models=["Item"],
+            features=[],
+            output_dir=d,
+        )
+        assert os.path.exists(result["output_path"])
+        assert result["route_count"] >= 1

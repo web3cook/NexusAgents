@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from agent.tools.registry import registry
 from agent.core.observability import instrument
 from agent.core.retry import rate_limit
@@ -233,3 +234,121 @@ def render_summary(aws_monthly_usd: float, llm_cost_usd: float, steps_estimated:
 def render_full_plan(steps: list[str]) -> dict:
     rate_limit("plan")
     return {"plan": steps, "total": len(steps)}
+
+
+@registry.register(
+    name="plan.generate_api_spec",
+    description="Generate an OpenAPI 3.0 YAML spec from AppSpec — deterministic, no LLM call",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "app_name":   {"type": "string"},
+            "api_routes": {"type": "array", "items": {"type": "string"}},
+            "db_models":  {"type": "array", "items": {"type": "string"}},
+            "features":   {"type": "array", "items": {"type": "string"}},
+            "output_dir": {"type": "string"},
+        },
+        "required": ["app_name", "api_routes", "db_models", "features"],
+    },
+)
+@instrument(namespace="plan", tool="generate_api_spec")
+def generate_api_spec(
+    app_name: str,
+    api_routes: list[str],
+    db_models: list[str],
+    features: list[str],
+    output_dir: str = "/tmp",
+) -> dict:
+    import yaml as _yaml
+
+    paths: dict = {}
+    for route in api_routes:
+        methods: list[str]
+        if any(k in route for k in ["/login", "/register", "/token"]):
+            methods = ["post"]
+        elif route.count("/") == 1:
+            methods = ["get", "post"]
+        else:
+            methods = ["get", "put", "delete"]
+
+        path_item: dict = {}
+        for method in methods:
+            tag = route.strip("/").split("/")[0] or "default"
+            path_item[method] = {
+                "tags": [tag],
+                "summary": f"{method.upper()} {route}",
+                "operationId": f"{method}_{route.strip('/').replace('/', '_')}",
+                "responses": {
+                    "200": {"description": "Successful response",
+                            "content": {"application/json": {"schema": {"type": "object"}}}},
+                    "400": {"description": "Bad request"},
+                    "401": {"description": "Unauthorized"},
+                },
+            }
+            if method in ("post", "put"):
+                model_name = next(
+                    (m for m in db_models if m.lower() in route.lower()),
+                    db_models[0] if db_models else "Item",
+                )
+                path_item[method]["requestBody"] = {
+                    "required": True,
+                    "content": {"application/json": {
+                        "schema": {"$ref": f"#/components/schemas/{model_name}Request"},
+                    }},
+                }
+        paths[route] = path_item
+
+    schemas: dict = {}
+    for model in db_models:
+        schemas[model] = {
+            "type": "object",
+            "properties": {
+                "id":         {"type": "integer", "example": 1},
+                "created_at": {"type": "string", "format": "date-time"},
+            },
+            "required": ["id"],
+        }
+        schemas[f"{model}Request"] = {"type": "object", "properties": {}, "required": []}
+
+    if "auth" in features:
+        paths.setdefault("/auth/login", {})["post"] = {
+            "tags": ["auth"],
+            "summary": "POST /auth/login",
+            "operationId": "post_auth_login",
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "properties": {
+                        "email":    {"type": "string", "example": "user@example.com"},
+                        "password": {"type": "string", "example": "secret"},
+                    },
+                    "required": ["email", "password"],
+                }}},
+            },
+            "responses": {
+                "200": {"description": "JWT token", "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "properties": {
+                        "access_token": {"type": "string"},
+                        "token_type":   {"type": "string"},
+                    },
+                }}}},
+                "401": {"description": "Invalid credentials"},
+            },
+        }
+
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": app_name, "version": "1.0.0"},
+        "paths": paths,
+        "components": {"schemas": schemas},
+    }
+
+    yaml_text = _yaml.dump(spec, default_flow_style=False, allow_unicode=True, sort_keys=True)
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, "openapi.yaml")
+    with open(out_path, "w") as fh:
+        fh.write(yaml_text)
+
+    return {"openapi_yaml": yaml_text, "output_path": out_path, "route_count": len(paths)}
