@@ -1,5 +1,7 @@
 from __future__ import annotations
+import logging
 import sys
+from enum import Enum
 from pathlib import Path
 import typer
 from rich.console import Console
@@ -8,6 +10,21 @@ from agent.core.observability import setup_logging
 
 app = typer.Typer(name="nexus", help="Autonomous full-stack app builder and deployer")
 console = Console()
+
+
+class LogLevel(str, Enum):
+    verbose = "verbose"   # DEBUG — every tool input/output, all internal detail
+    normal  = "normal"    # INFO  — phase transitions + tool names + results (default)
+    bugs    = "bugs"      # WARNING — only errors and warnings
+    silent  = "silent"    # ERROR — essentially quiet
+
+
+_LOG_LEVELS: dict[LogLevel, int] = {
+    LogLevel.verbose: logging.DEBUG,
+    LogLevel.normal:  logging.INFO,
+    LogLevel.bugs:    logging.WARNING,
+    LogLevel.silent:  logging.ERROR,
+}
 
 
 @app.command()
@@ -19,9 +36,10 @@ def build(
     telegram_chat: str = typer.Option("", envvar="TELEGRAM_CHAT_ID", help="Telegram chat ID"),
     dry_run: bool = typer.Option(False, help="Show cost estimate only, do not build"),
     resume: bool = typer.Option(False, help="Resume from last checkpoint"),
+    log_level: LogLevel = typer.Option(LogLevel.normal, "--log-level", help="verbose=all detail, normal=progress, bugs=warnings/errors, silent=quiet"),
 ):
     """Build and deploy a full-stack application from a description."""
-    setup_logging()
+    setup_logging(level=_LOG_LEVELS[log_level])
     console.print(Panel.fit("[bold blue]NEXUS[/bold blue] — Autonomous App Builder", subtitle="Starting build..."))
     console.print(f"[dim]Description:[/dim] {description}")
     console.print(f"[dim]Workspace:[/dim] {workspace}")
@@ -71,9 +89,10 @@ def eval_cmd(
     description: str = typer.Argument("Build a SaaS app with login and dashboard"),
     workspace: str = typer.Option("/tmp/nexus-eval-workspace"),
     mock: bool = typer.Option(True, help="Use mock AWS (moto) — no real AWS calls"),
+    log_level: LogLevel = typer.Option(LogLevel.normal, "--log-level"),
 ):
     """Run the evaluation harness against a known spec."""
-    setup_logging()
+    setup_logging(level=_LOG_LEVELS[log_level])
     from eval.harness import run_eval
     from eval.cases.basic_saas import EVAL_CASE
     from agent.core.state import BuildState, CostSummary, AppSpec

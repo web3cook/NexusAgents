@@ -99,12 +99,14 @@ def run(user_description: str, workspace: str, checkpoint_dir: Path | None = Non
                 display_name = registry._registry_name(block.name) if "__" in block.name else block.name
                 t0 = time.monotonic()
                 logger.info("  [dim]#%d[/dim] → %s", state.tool_call_count, display_name)
+                logger.debug("       input: %s", block.input)
                 try:
                     result = registry.call(block.name, **block.input)
                     _update_state(state, block.name, result)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     status_str = _result_summary(result)
                     logger.info("       [green]ok[/green] %s  [dim]%dms[/dim]", status_str, elapsed_ms)
+                    logger.debug("       full result: %s", result)
                 except Exception as exc:
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     logger.warning("       [red]err[/red] %s  [dim]%dms[/dim]", exc, elapsed_ms)
