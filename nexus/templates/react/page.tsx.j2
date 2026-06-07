@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 
 interface {{ model_name }} {
   id: number
-  {% for field in fields %}{{ field.name }}: {{ field.ts_type }}
+  {% for field in fields %}{{ field.name }}: {{ field.ts_type or 'string' }}
   {% endfor %}
 }
 

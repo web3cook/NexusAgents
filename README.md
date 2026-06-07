@@ -8,7 +8,7 @@ To run the repo, go to [nexus/README.md](/nexus/README.md) for setup instruction
 
 ## How it works
 
-You give Nexus a plain-English description. It plans, scaffolds, builds, deploys, and monitors a complete production application on AWS EKS — no manual steps.
+You give Nexus a plain-English description. It plans, scaffolds, builds, deploys, and monitors a complete production application on AWS EKS no manual steps.
 
 **Stack:** React + TypeScript · FastAPI + PostgreSQL · AWS EKS · Telegram alerting
 
@@ -33,7 +33,7 @@ PLANNING → API_SPEC → BUILD → INFRA → TEST → MONITORING → COMPLETE
 | 5 | **Infra Agent** | `claude-sonnet-4-6` | Provisions RDS, S3, EKS, deploys K8s manifests, runs Alembic migrations, wires CloudFront |
 | 6 | **Alerting Agent** | `claude-haiku-4-5` | Persistent polling loop — parses live pod logs, evaluates rules, fires Telegram alerts |
 
-Backend and Frontend builders run in parallel subprocesses — they share no state and communicate only through the workspace directory. The OpenAPI spec generated in `API_SPEC` is passed to both as the source of truth for field names and endpoint contracts.
+Backend and Frontend builders run in parallel subprocesses, they share no state and communicate only through the workspace directory. The OpenAPI spec generated in `API_SPEC` is passed to both as the source of truth for field names and endpoint contracts.
 
 ---
 
@@ -41,11 +41,11 @@ Backend and Frontend builders run in parallel subprocesses — they share no sta
 
 1. Every build gets a unique **session ID** (e.g. `6a26ba13`)
 2. The session folder at `/tmp/nexus-workflow/<session-id>/` contains:
-   - `checkpoint.json` — full `BuildState`: current phase, agent statuses, file registry, AWS resources created, cost totals
-   - `api/openapi.yaml` — the generated OpenAPI spec
-   - `backend/` and `frontend/` — all scaffolded source files
-   - `k8s/` — Kubernetes manifests
-   - `docker-compose.yml` — for local testing
+   - `checkpoint.json`: full `BuildState`: current phase, agent statuses, file registry, AWS resources created, cost totals
+   - `api/openapi.yaml`: the generated OpenAPI spec
+   - `backend/` and `frontend/`: all scaffolded source files
+   - `k8s/`: Kubernetes manifests
+   - `docker-compose.yml`: for local testing
 3. If the build stops for any reason (crash, timeout, interrupt), it saves state to `checkpoint.json`. Pass `--resume` to pick up exactly where it left off:
    ```bash
    nexus build "..." --resume              # resumes last session
@@ -74,9 +74,9 @@ Backend and Frontend builders run in parallel subprocesses — they share no sta
 
 ## Key engineering decisions
 
-- **Fixed stack (React + FastAPI + PostgreSQL + EKS)** — keeps templates deterministic and avoids the LLM choosing incompatible combinations
-- **OpenAPI spec as shared contract** — generated deterministically in `API_SPEC`, passed to both builders so frontend field names cannot diverge from backend
-- **Parallel build** — backend and frontend scaffold concurrently in separate `ProcessPoolExecutor` workers, cutting build time roughly in half
-- **Idempotent AWS tools** — every `create_*` tool returns the existing resource if it already exists, so retries and resumes don't duplicate infrastructure
-- **ExitCode-0 nodegroup bug** — `eksctl` exits 0 even when it creates 0 nodegroups (runs a "fix compatibility" task instead). Nexus re-verifies with `eks.list_nodegroups()` after every eksctl call and raises a retryable error if empty
-- **Retryable error hierarchy** — `TransientAwsError` and `NetworkError` trigger exponential backoff; `NexusError(retryable=True)` does the same for K8s waits; all other errors surface immediately
+- **Fixed stack (React + FastAPI + PostgreSQL + EKS)**: keeps templates deterministic and avoids the LLM choosing incompatible combinations
+- **OpenAPI spec as shared contract**: generated deterministically in `API_SPEC`, passed to both builders so frontend field names cannot diverge from backend
+- **Parallel build**: backend and frontend scaffold concurrently in separate `ProcessPoolExecutor` workers, cutting build time roughly in half
+- **Idempotent AWS tools**: every `create_*` tool returns the existing resource if it already exists, so retries and resumes don't duplicate infrastructure
+- **ExitCode-0 nodegroup bug**: `eksctl` exits 0 even when it creates 0 nodegroups (runs a "fix compatibility" task instead). Nexus re-verifies with `eks.list_nodegroups()` after every eksctl call and raises a retryable error if empty
+- **Retryable error hierarchy**: `TransientAwsError` and `NetworkError` trigger exponential backoff; `NexusError(retryable=True)` does the same for K8s waits; all other errors surface immediately

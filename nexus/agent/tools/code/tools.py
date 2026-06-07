@@ -365,6 +365,15 @@ def scaffold_fastapi_project(
         "fastapi\nuvicorn\nsqlalchemy\nalembic\nbcrypt\npyjwt\n"
         "psycopg2-binary\nboto3\n",
     ))
+    files.append(_write(
+        workspace, "docker-compose.yml",
+        _render(
+            "docker-compose.yml.j2",
+            db_name="nexusdb",
+            db_user="nexus",
+            db_password="nexuspassword",
+        ),
+    ))
     env_vars = ["DATABASE_URL", "JWT_SECRET", "AWS_REGION", "CLUSTER_NAME"]
     return {
         "files_created": files,
@@ -1071,6 +1080,219 @@ def generate_api_client(workspace: str, api_spec_path: str) -> dict:
             workspace, "frontend/src/pages/Register.tsx",
             _gen_register_tsx(register_fields),
         ),
+    ]
+    return {
+        "files_created": files,
+        "login_fields": login_fields,
+        "register_fields": register_fields,
+    }
+
+
+def _gen_fastapi_auth(login_fields: list, register_fields: list) -> str:
+    """Generates backend/app/routes/auth.py aligned with the OpenAPI spec."""
+    type_map = {"string": "str", "integer": "int", "number": "float", "boolean": "bool"}
+
+    login_py = "\n".join(
+        f"    {name}: {type_map.get(ts_type, 'str')}"
+        for name, ts_type in login_fields
+    )
+    register_py = "\n".join(
+        f"    {name}: {type_map.get(ts_type, 'str')}"
+        for name, ts_type in register_fields
+    )
+    extra_fields = [
+        name for name, _ in register_fields
+        if name not in ("email", "password")
+    ]
+    if extra_fields:
+        user_kwargs = "email=req.email, password_hash=hashed, " + ", ".join(
+            f"{name}=req.{name}" for name in extra_fields
+        )
+    else:
+        user_kwargs = "email=req.email, password_hash=hashed"
+
+    return f'''from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+import jwt, bcrypt
+from datetime import datetime, timedelta
+from app.database import get_db
+from app.models.user import User
+
+router = APIRouter()
+security = HTTPBearer()
+JWT_SECRET = __import__("os").environ.get("JWT_SECRET", "change-me")
+
+
+class LoginRequest(BaseModel):
+{login_py}
+
+
+class RegisterRequest(BaseModel):
+{register_py}
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+def _make_token(user_id: int) -> str:
+    return jwt.encode(
+        {{"sub": str(user_id), "exp": datetime.utcnow() + timedelta(hours=24)}},
+        JWT_SECRET, algorithm="HS256",
+    )
+
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+) -> User:
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
+        user = db.query(User).filter(User.id == int(payload["sub"])).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return current_user
+
+
+@router.post("/register", response_model=TokenResponse, status_code=201)
+def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == req.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
+    user = User({user_kwargs})
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return TokenResponse(access_token=_make_token(user.id))
+
+
+@router.post("/login", response_model=TokenResponse)
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user or not bcrypt.checkpw(req.password.encode(), user.password_hash.encode()):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return TokenResponse(access_token=_make_token(user.id))
+
+
+@router.get("/me", response_model=UserResponse)
+def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
+'''
+
+
+def _gen_user_model(register_fields: list) -> str:
+    """Generates backend/app/models/user.py aligned with the OpenAPI register spec."""
+    type_map = {
+        "string": "String",
+        "integer": "Integer",
+        "number": "Float",
+        "boolean": "Boolean",
+    }
+    extra_cols = []
+    for name, ts_type in register_fields:
+        if name in ("email", "password"):
+            continue
+        sa_type = type_map.get(ts_type, "String")
+        extra_cols.append(f"    {name} = Column({sa_type}, nullable=True)")
+
+    extra_cols_str = "\n".join(extra_cols)
+    if extra_cols_str:
+        extra_cols_str = "\n" + extra_cols_str
+
+    return f'''from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float
+from sqlalchemy.sql import func
+from app.database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+{extra_cols_str}
+    is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+'''
+
+
+@registry.register(
+    name="code.generate_fastapi_auth",
+    description=(
+        "Overwrites backend/app/routes/auth.py and backend/app/models/user.py "
+        "with implementations that exactly match the OpenAPI spec field names "
+        "for /auth/login and /auth/register. Call this AFTER scaffold_fastapi_project."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "workspace": {"type": "string", "description": "Root workspace directory"},
+            "api_spec_path": {"type": "string", "description": "Path to the OpenAPI YAML spec"},
+        },
+        "required": ["workspace", "api_spec_path"],
+    },
+)
+@instrument(namespace="code", tool="generate_fastapi_auth")
+def generate_fastapi_auth(workspace: str, api_spec_path: str) -> dict:
+    """Generates spec-aligned FastAPI auth files.
+
+    Reads the OpenAPI spec and overwrites backend/app/routes/auth.py and
+    backend/app/models/user.py so field names match the spec exactly.
+
+    Args:
+        workspace: Root workspace directory.
+        api_spec_path: Path to the OpenAPI YAML spec.
+
+    Returns:
+        Dict with files_created, login_fields, register_fields.
+    """
+    import yaml as _yaml
+
+    rate_limit("code")
+    spec = _yaml.safe_load(Path(api_spec_path).read_text(encoding="utf-8"))
+    paths = spec.get("paths", {})
+
+    login_fields = _extract_fields(paths, "/auth/login", "post")
+    if not login_fields:
+        login_fields = [("email", "string"), ("password", "string")]
+
+    register_fields = _extract_fields(paths, "/auth/register", "post")
+    if not register_fields:
+        register_fields = [
+            ("email", "string"),
+            ("password", "string"),
+            ("name", "string"),
+        ]
+
+    files = [
+        _write(workspace, "backend/app/routes/auth.py",
+               _gen_fastapi_auth(login_fields, register_fields)),
+        _write(workspace, "backend/app/models/user.py",
+               _gen_user_model(register_fields)),
     ]
     return {
         "files_created": files,
