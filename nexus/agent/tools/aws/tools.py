@@ -147,12 +147,13 @@ def create_eks_cluster(
                 ],
                 capture_output=True, text=True,
                 stdin=subprocess.DEVNULL,
-                # eksctl blocks until ACTIVE — allow up to 25 minutes.
-                timeout=1500,
+                # eksctl blocks until ACTIVE — allow up to 45 minutes;
+                # node group CF stacks routinely take 30+ minutes.
+                timeout=2700,
             )
         except subprocess.TimeoutExpired:
             raise TransientAwsError(
-                "eksctl create cluster timed out after 1500s"
+                "eksctl create cluster timed out after 2700s"
             )
         if result.returncode != 0:
             raise TransientAwsError(
@@ -196,11 +197,12 @@ def create_eks_cluster(
                 ],
                 capture_output=True, text=True,
                 stdin=subprocess.DEVNULL,
-                timeout=900,  # node group provisioning takes 8-15 min
+                # Node group CF stack can take 30+ min; allow 35 min.
+                timeout=2100,
             )
         except subprocess.TimeoutExpired:
             raise TransientAwsError(
-                "eksctl create nodegroup timed out after 900s"
+                "eksctl create nodegroup timed out after 2100s"
             )
         if ng_result.returncode != 0:
             raise TransientAwsError(

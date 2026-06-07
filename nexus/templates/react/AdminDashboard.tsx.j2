@@ -1,44 +1,102 @@
 import { useState, useEffect } from 'react'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../lib/api'
 
 interface Metrics { timestamp: string; cpu_percent: number; memory_mb: number; error_count: number }
 interface Summary { monthly_cost_usd: number; pods_healthy: number; pods_total: number }
+
+const ACCENT_CLS: Record<string, string> = {
+  blue: 'text-blue-600', green: 'text-green-600', red: 'text-red-500',
+}
+const CHART_MARGIN = { top: 4, right: 4, left: -20, bottom: 0 }
+const TICK_STYLE = { fontSize: 10, fill: '#9ca3af' }
+const TOOLTIP_STYLE = { borderRadius: '8px', border: '1px solid #e5e7eb', fontSize: '12px' }
+
+function StatCard({ label, value, sub, accent = 'blue' }: {
+  label: string; value: string; sub?: string; accent?: 'blue' | 'green' | 'red'
+}) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">{label}</p>
+      <p className={`text-2xl font-bold ${ACCENT_CLS[accent]}`}>{value}</p>
+      {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
+    </div>
+  )
+}
+
+function Chart({ data, dataKey, color, label }: {
+  data: Metrics[]; dataKey: keyof Metrics; color: string; label: string
+}) {
+  const gradId = `grad-${String(dataKey)}`
+  const cursorStyle = { stroke: color, strokeWidth: 1, strokeDasharray: '4 2' }
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <h2 className="text-sm font-semibold text-gray-700 mb-4">{label}</h2>
+      <ResponsiveContainer width="100%" height={180}>
+        <AreaChart data={data} margin={CHART_MARGIN}>
+          <defs>
+            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={color} stopOpacity={0.12} />
+              <stop offset="95%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+          <XAxis dataKey="timestamp" tick={TICK_STYLE} tickLine={false} axisLine={false} />
+          <YAxis tick={TICK_STYLE} tickLine={false} axisLine={false} />
+          <Tooltip contentStyle={TOOLTIP_STYLE} cursor={cursorStyle} />
+          <Area type="monotone" dataKey={dataKey as string} stroke={color} fill={`url(#${gradId})`} strokeWidth={2} dot={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
 
 export default function AdminDashboard() {
   const [metrics, setMetrics] = useState<Metrics[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
 
   useEffect(() => {
-    const fetch = () => {
+    const load = () => {
       api.get<Metrics[]>('/admin/metrics').then(r => setMetrics(r.data)).catch(() => {})
       api.get<Summary>('/admin/summary').then(r => setSummary(r.data)).catch(() => {})
     }
-    fetch()
-    const id = setInterval(fetch, 30_000)
+    load()
+    const id = setInterval(load, 30_000)
     return () => clearInterval(id)
   }, [])
 
+  const podAccent = summary && summary.pods_healthy === summary.pods_total ? 'green' : 'red'
+  const lastErr = metrics.length ? metrics[metrics.length - 1].error_count : null
+
   return (
-    <div className="container mx-auto p-6">
-      <h1 className="text-2xl font-bold mb-6">Admin Dashboard</h1>
-      {summary && (
-        <div className="grid grid-cols-3 gap-4 mb-8">
-          <div className="bg-white rounded border p-4"><p className="text-sm text-gray-500">Monthly AWS Cost</p><p className="text-3xl font-bold">${summary.monthly_cost_usd.toFixed(2)}</p></div>
-          <div className="bg-white rounded border p-4"><p className="text-sm text-gray-500">Pods Healthy</p><p className="text-3xl font-bold">{summary.pods_healthy}/{summary.pods_total}</p></div>
-        </div>
-      )}
-      <div className="bg-white rounded border p-4 mb-4">
-        <h2 className="font-semibold mb-2">CPU Usage (%)</h2>
-        <ResponsiveContainer width="100%" height={200}>
-          <LineChart data={metrics}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="timestamp" /><YAxis /><Tooltip /><Line type="monotone" dataKey="cpu_percent" stroke="#6366f1" /></LineChart>
-        </ResponsiveContainer>
+    <div className="p-8 max-w-6xl">
+      <div className="mb-8">
+        <h1 className="text-xl font-bold text-gray-900">Dashboard</h1>
+        <p className="text-sm text-gray-400 mt-0.5">Live infrastructure overview · refreshes every 30s</p>
       </div>
-      <div className="bg-white rounded border p-4">
-        <h2 className="font-semibold mb-2">Error Count</h2>
-        <ResponsiveContainer width="100%" height={200}>
-          <LineChart data={metrics}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="timestamp" /><YAxis /><Tooltip /><Line type="monotone" dataKey="error_count" stroke="#ef4444" /></LineChart>
-        </ResponsiveContainer>
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        <StatCard
+          label="Monthly AWS Cost"
+          value={summary ? `$${summary.monthly_cost_usd.toFixed(2)}` : '—'}
+          sub="current billing period"
+          accent="blue"
+        />
+        <StatCard
+          label="Pods Healthy"
+          value={summary ? `${summary.pods_healthy} / ${summary.pods_total}` : '—'}
+          sub="running pods"
+          accent={podAccent}
+        />
+        <StatCard
+          label="Recent Errors"
+          value={lastErr !== null ? String(lastErr) : '—'}
+          sub="last sample"
+          accent={lastErr ? 'red' : 'green'}
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <Chart data={metrics} dataKey="cpu_percent" color="#6366f1" label="CPU Usage (%)" />
+        <Chart data={metrics} dataKey="error_count" color="#ef4444" label="Error Count" />
       </div>
     </div>
   )
