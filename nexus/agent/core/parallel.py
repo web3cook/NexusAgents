@@ -187,19 +187,28 @@ def _run_agent_subprocess(
     }
 
 
-def _run_backend_subprocess(app_spec_dict: dict, workspace: str) -> dict:
+def _run_backend_subprocess(
+    app_spec_dict: dict,
+    workspace: str,
+    api_spec_path: str | None = None,
+) -> dict:
     """Runs the backend builder subagent in a child process.
 
     Args:
         app_spec_dict: The app spec serialized as a dict.
         workspace: The root workspace directory.
+        api_spec_path: Path to the OpenAPI YAML spec, passed so the subagent
+            can call code.generate_fastapi_auth for spec alignment.
 
     Returns:
         The backend builder's result dict.
     """
+    extra: dict | None = (
+        {"api_spec_path": api_spec_path} if api_spec_path else None
+    )
     return _run_agent_subprocess(
         "agent.subagents.backend_builder.BackendBuilderSubagent",
-        app_spec_dict, workspace,
+        app_spec_dict, workspace, extra,
     )
 
 
@@ -255,7 +264,9 @@ def run_build_parallel(
 
     api_spec_path = getattr(state, "api_spec_path", None)
     with ProcessPoolExecutor(max_workers=2) as pool:
-        fut_backend = pool.submit(_run_backend_subprocess, spec_dict, workspace)
+        fut_backend = pool.submit(
+            _run_backend_subprocess, spec_dict, workspace, api_spec_path
+        )
         fut_frontend = pool.submit(
             _run_frontend_subprocess, spec_dict, workspace, api_spec_path
         )

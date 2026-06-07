@@ -1,0 +1,339 @@
+components:
+  schemas:
+    ApiKey:
+      properties:
+        created_at:
+          format: date-time
+          type: string
+        id:
+          example: 1
+          type: integer
+      required:
+      - id
+      type: object
+    ApiKeyRequest:
+      properties: {}
+      required: []
+      type: object
+    DietLog:
+      properties:
+        created_at:
+          format: date-time
+          type: string
+        id:
+          example: 1
+          type: integer
+      required:
+      - id
+      type: object
+    DietLogRequest:
+      properties: {}
+      required: []
+      type: object
+    ExerciseLog:
+      properties:
+        created_at:
+          format: date-time
+          type: string
+        id:
+          example: 1
+          type: integer
+      required:
+      - id
+      type: object
+    ExerciseLogRequest:
+      properties: {}
+      required: []
+      type: object
+    Suggestion:
+      properties:
+        created_at:
+          format: date-time
+          type: string
+        id:
+          example: 1
+          type: integer
+      required:
+      - id
+      type: object
+    SuggestionRequest:
+      properties: {}
+      required: []
+      type: object
+    User:
+      properties:
+        created_at:
+          format: date-time
+          type: string
+        id:
+          example: 1
+          type: integer
+      required:
+      - id
+      type: object
+    UserRequest:
+      properties: {}
+      required: []
+      type: object
+info:
+  title: Fitness and Nutrition Coach
+  version: 1.0.0
+openapi: 3.0.0
+paths:
+  /auth/login:
+    post:
+      operationId: post_auth_login
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: POST /auth/login
+      tags:
+      - auth
+  /auth/logout:
+    delete:
+      operationId: delete_auth_logout
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: DELETE /auth/logout
+      tags:
+      - auth
+    get:
+      operationId: get_auth_logout
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: GET /auth/logout
+      tags:
+      - auth
+    put:
+      operationId: put_auth_logout
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: PUT /auth/logout
+      tags:
+      - auth
+  /auth/register:
+    post:
+      operationId: post_auth_register
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: POST /auth/register
+      tags:
+      - auth
+  /diet:
+    get:
+      operationId: get_diet
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: GET /diet
+      tags:
+      - diet
+    post:
+      operationId: post_diet
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: POST /diet
+      tags:
+      - diet
+  /exercise:
+    get:
+      operationId: get_exercise
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: GET /exercise
+      tags:
+      - exercise
+    post:
+      operationId: post_exercise
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: POST /exercise
+      tags:
+      - exercise
+  /keys:
+    get:
+      operationId: get_keys
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: GET /keys
+      tags:
+      - keys
+    post:
+      operationId: post_keys
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: POST /keys
+      tags:
+      - keys
+  /suggestions:
+    get:
+      operationId: get_suggestions
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: GET /suggestions
+      tags:
+      - suggestions
+    post:
+      operationId: post_suggestions
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestionRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+      summary: POST /suggestions
+      tags:
+      - suggestions
