@@ -1,14 +1,66 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import AdminDashboard from './pages/AdminDashboard'
 {% for page in pages %}import {{ page }} from './pages/{{ page }}'
 {% endfor %}
+const NAV_ITEMS = [
+  { to: '/admin', label: 'Dashboard' },
+  {% for page in pages %}{ to: '/{{ page | lower }}', label: '{{ page | replace("([A-Z])", " $1") | trim }}' },
+  {% endfor %}
+]
+
+function Sidebar() {
+  const { logout } = useAuth()
+  return (
+    <aside className="w-60 bg-gray-900 flex flex-col min-h-screen shrink-0">
+      <div className="px-6 py-5 border-b border-gray-800">
+        <span className="text-white font-bold text-lg tracking-tight">Nexus</span>
+      </div>
+      <nav className="flex-1 px-3 py-4 space-y-0.5">
+        {NAV_ITEMS.map(item => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            className={({ isActive }) =>
+              `flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                isActive
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+              }`
+            }
+          >
+            {item.label}
+          </NavLink>
+        ))}
+      </nav>
+      <div className="px-3 py-4 border-t border-gray-800">
+        <button
+          onClick={logout}
+          className="w-full text-left px-3 py-2 text-sm text-gray-500 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+        >
+          Sign out
+        </button>
+      </div>
+    </aside>
+  )
+}
+
+function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen bg-gray-50">
+      <Sidebar />
+      <main className="flex-1 min-h-screen overflow-auto">{children}</main>
+    </div>
+  )
+}
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth()
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" />
+  return isAuthenticated
+    ? <AppShell>{children}</AppShell>
+    : <Navigate to="/login" replace />
 }
 
 export default function App() {
@@ -21,7 +73,7 @@ export default function App() {
           <Route path="/admin" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
           {% for page in pages %}<Route path="/{{ page | lower }}" element={<PrivateRoute><{{ page }} /></PrivateRoute>} />
           {% endfor %}
-          <Route path="/" element={<Navigate to="/{{ pages[0] | lower if pages else 'admin' }}" />} />
+          <Route path="/" element={<Navigate to="/admin" replace />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
